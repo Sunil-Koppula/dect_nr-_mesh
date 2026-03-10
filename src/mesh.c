@@ -27,6 +27,12 @@ void discovery_add_response(const pair_response_packet_t *pkt, int16_t rssi_2)
 		return;
 	}
 
+	/* Sensors can only pair with gateways or anchors */
+	if (my_device_type == DEVICE_TYPE_SENSOR &&
+	    pkt->device_type == DEVICE_TYPE_SENSOR) {
+		return;
+	}
+
 	struct discovery_candidate *c = &candidates[candidate_count++];
 	c->device_type = pkt->device_type;
 	c->device_id = pkt->device_id;

@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Sensor own identity record */
+/* Sensor own identity record (sensors are leaf nodes, no hop number) */
 typedef struct {
 	uint16_t device_id;
 	uint8_t device_type;

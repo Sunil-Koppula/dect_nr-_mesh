@@ -1,9 +1,12 @@
 /*
  * Gateway device logic for DECT NR+ mesh network
  *
- * Two threads:
- *   1. RX thread     — keeps the radio in continuous receive mode
- *   2. Process thread — dequeues received packets and responds accordingly
+ * Single-threaded RX/TX approach:
+ *   - Listen for packets during an RX window
+ *   - When RX completes, process all queued packets (TX responses as needed)
+ *   - Restart RX
+ *
+ * This avoids modem scheduling conflicts since TX and RX never overlap.
  */
 
 #include <zephyr/kernel.h>
@@ -21,16 +24,6 @@ LOG_MODULE_DECLARE(app);
 
 #define GW_TX_HANDLE 1
 #define GW_RX_HANDLE 2
-
-#define GW_RX_STACK_SIZE   2048
-#define GW_PROC_STACK_SIZE 2048
-#define GW_RX_PRIORITY     7
-#define GW_PROC_PRIORITY   8
-
-static struct k_thread rx_thread_data;
-static struct k_thread proc_thread_data;
-static K_THREAD_STACK_DEFINE(rx_stack, GW_RX_STACK_SIZE);
-static K_THREAD_STACK_DEFINE(proc_stack, GW_PROC_STACK_SIZE);
 
 /* === Gateway storage helpers === */
 
@@ -138,6 +131,18 @@ void gw_print_paired(void)
 	}
 }
 
+/* === TX helper: transmit and wait for completion === */
+
+static int gw_transmit(void *data, size_t len)
+{
+	int err = transmit(GW_TX_HANDLE, data, len);
+	if (err) {
+		return err;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+	return 0;
+}
+
 /* === Packet handlers === */
 
 static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2)
@@ -209,29 +214,22 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		.status = 0,
 	};
 
-	int err = transmit(GW_TX_HANDLE, &ack, sizeof(ack));
+	int err = gw_transmit(&ack, sizeof(ack));
 	if (err) {
 		LOG_ERR("Failed to send data ACK, err %d", err);
 		return;
 	}
-	k_sem_take(&operation_sem, K_FOREVER);
 
 	LOG_DBG("Data ACK sent to ID:%d", pkt->src_device_id);
 }
 
-/* === Process thread: dequeue and handle packets one by one === */
+/* === Process all queued packets (called when RX window ends) === */
 
-static void gw_process_thread(void *p1, void *p2, void *p3)
+static void gw_process_queue(void)
 {
 	struct rx_queue_item item;
 
-	LOG_INF("Gateway process thread started");
-
-	while (true) {
-		if (rx_queue_get(&item, K_FOREVER) != 0) {
-			continue;
-		}
-
+	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
 		if (item.len < 1) {
 			continue;
 		}
@@ -270,24 +268,6 @@ static void gw_process_thread(void *p1, void *p2, void *p3)
 	}
 }
 
-/* === RX thread: keep radio in continuous receive === */
-
-static void gw_rx_thread(void *p1, void *p2, void *p3)
-{
-	LOG_INF("Gateway RX thread started");
-
-	while (true) {
-		int err = receive(GW_RX_HANDLE);
-		if (err) {
-			LOG_ERR("Receive failed, err %d", err);
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
-		/* Wait for RX operation to complete before restarting */
-		k_sem_take(&operation_sem, K_FOREVER);
-	}
-}
-
 /* === Gateway entry point === */
 
 void gateway_main(void)
@@ -295,20 +275,22 @@ void gateway_main(void)
 	LOG_INF("Gateway mode started (ID:%d, hop:0)", device_id);
 	gw_print_paired();
 
-	/* Start RX thread — keeps radio listening continuously */
-	k_thread_create(&rx_thread_data, rx_stack,
-			K_THREAD_STACK_SIZEOF(rx_stack),
-			gw_rx_thread, NULL, NULL, NULL,
-			GW_RX_PRIORITY, 0, K_NO_WAIT);
-	k_thread_name_set(&rx_thread_data, "gw_rx");
+	while (true) {
+		/* Start RX window */
+		int err = receive(GW_RX_HANDLE);
+		if (err) {
+			LOG_ERR("Receive failed, err %d", err);
+			k_sleep(K_SECONDS(1));
+			continue;
+		}
 
-	/* Start process thread — dequeues and handles packets */
-	k_thread_create(&proc_thread_data, proc_stack,
-			K_THREAD_STACK_SIZEOF(proc_stack),
-			gw_process_thread, NULL, NULL, NULL,
-			GW_PROC_PRIORITY, 0, K_NO_WAIT);
-	k_thread_name_set(&proc_thread_data, "gw_proc");
+		/* Wait for RX window to complete */
+		k_sem_take(&operation_sem, K_FOREVER);
 
-	/* Block here — threads run independently */
-	k_thread_join(&rx_thread_data, K_FOREVER);
+		/* RX done — now process all queued packets and TX responses */
+		gw_process_queue();
+
+		/* Small gap before next RX window */
+		k_sleep(K_MSEC(10));
+	}
 }
