@@ -1,0 +1,129 @@
+/*
+ * Mesh protocol shared utilities for DECT NR+ mesh network
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
+#include "mesh.h"
+#include "radio.h"
+#include "state.h"
+
+LOG_MODULE_DECLARE(app);
+
+/* Discovery state */
+static struct discovery_candidate candidates[MAX_CANDIDATES];
+static int candidate_count;
+
+void discovery_reset(void)
+{
+	candidate_count = 0;
+}
+
+void discovery_add_response(const pair_response_packet_t *pkt, int16_t rssi_2)
+{
+	if (candidate_count >= MAX_CANDIDATES) {
+		LOG_WRN("Candidate list full");
+		return;
+	}
+
+	struct discovery_candidate *c = &candidates[candidate_count++];
+	c->device_type = pkt->device_type;
+	c->device_id = pkt->device_id;
+	c->hash = pkt->hash;
+	c->hop_num = pkt->hop_num;
+	c->rssi_2 = rssi_2;
+}
+
+const struct discovery_candidate *discovery_best(void)
+{
+	if (candidate_count == 0) {
+		return NULL;
+	}
+
+	const struct discovery_candidate *best = &candidates[0];
+
+	for (int i = 1; i < candidate_count; i++) {
+		const struct discovery_candidate *c = &candidates[i];
+
+		/* Gateway always wins */
+		if (c->device_type == DEVICE_TYPE_GATEWAY &&
+		    best->device_type != DEVICE_TYPE_GATEWAY) {
+			best = c;
+			continue;
+		}
+		if (best->device_type == DEVICE_TYPE_GATEWAY &&
+		    c->device_type != DEVICE_TYPE_GATEWAY) {
+			continue;
+		}
+
+		/* Prefer lower hop count */
+		if (c->hop_num < best->hop_num) {
+			best = c;
+			continue;
+		}
+		if (c->hop_num > best->hop_num) {
+			continue;
+		}
+
+		/* Same hop: prefer better RSSI */
+		if (c->rssi_2 > best->rssi_2) {
+			best = c;
+		}
+	}
+
+	return best;
+}
+
+int discovery_count(void)
+{
+	return candidate_count;
+}
+
+uint32_t compute_pair_hash(uint16_t dev_id, uint32_t random_num)
+{
+	uint32_t h = (uint32_t)dev_id ^ random_num;
+	h = ((h << 13) | (h >> 19)) ^ (h * 0x5bd1e995);
+	return h;
+}
+
+uint32_t next_random(void)
+{
+	return sys_rand32_get();
+}
+
+/* TX helpers */
+
+int send_pair_request(uint32_t handle, uint32_t random_num)
+{
+	pair_request_packet_t pkt = {
+		.packet_type = PACKET_TYPE_PAIR_REQUEST,
+		.device_type = (uint8_t)my_device_type,
+		.device_id = device_id,
+		.random_num = random_num,
+	};
+	return transmit(handle, &pkt, sizeof(pkt));
+}
+
+int send_pair_response(uint32_t handle, uint16_t dst_id, uint32_t hash)
+{
+	pair_response_packet_t pkt = {
+		.packet_type = PACKET_TYPE_PAIR_RESPONSE,
+		.device_type = (uint8_t)my_device_type,
+		.device_id = device_id,
+		.hash = hash,
+		.hop_num = my_hop_num,
+	};
+	return transmit(handle, &pkt, sizeof(pkt));
+}
+
+int send_pair_confirm(uint32_t handle, uint8_t status)
+{
+	pair_confirm_packet_t pkt = {
+		.packet_type = PACKET_TYPE_PAIR_CONFIRM,
+		.device_type = (uint8_t)my_device_type,
+		.device_id = device_id,
+		.status = status,
+	};
+	return transmit(handle, &pkt, sizeof(pkt));
+}
