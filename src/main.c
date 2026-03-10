@@ -6,9 +6,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
 #include <zephyr/drivers/hwinfo.h>
+#include <dk_buttons_and_leds.h>
 #include "packet.h"
 #include "radio.h"
 #include "storage.h"
@@ -25,6 +27,34 @@ uint16_t device_id;
 device_type_t my_device_type = (device_type_t)CONFIG_DEVICE_TYPE;
 uint8_t my_hop_num;
 
+/* Factory reset: hold button 1 for 5 seconds */
+#define FACTORY_RESET_HOLD_MS 5000
+
+static int64_t btn1_press_time;
+
+static void button_handler(uint32_t button_state, uint32_t has_changed)
+{
+	if (has_changed & DK_BTN1_MSK) {
+		if (button_state & DK_BTN1_MSK) {
+			btn1_press_time = k_uptime_get();
+		} else {
+			int64_t held_ms = k_uptime_get() - btn1_press_time;
+
+			if (held_ms >= FACTORY_RESET_HOLD_MS) {
+				LOG_WRN("Factory reset! Clearing NVM...");
+				int err = storage_clear_all();
+				if (err) {
+					LOG_ERR("NVM clear failed, err %d", err);
+				} else {
+					LOG_WRN("NVM cleared. Rebooting...");
+				}
+				k_sleep(K_MSEC(500));
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+		}
+	}
+}
+
 int main(void)
 {
 	int err;
@@ -39,6 +69,13 @@ int main(void)
 	err = storage_init();
 	if (err) {
 		LOG_ERR("storage init failed, err %d", err);
+		return err;
+	}
+
+	/* Initialize buttons for factory reset */
+	err = dk_buttons_init(button_handler);
+	if (err) {
+		LOG_ERR("buttons init failed, err %d", err);
 		return err;
 	}
 

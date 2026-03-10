@@ -27,4 +27,7 @@ int storage_delete(uint16_t key);
 /* Check if NVS key exists */
 bool storage_exists(uint16_t key);
 
+/* Erase all NVS data (factory reset) */
+int storage_clear_all(void);
+
 #endif /* STORAGE_H */

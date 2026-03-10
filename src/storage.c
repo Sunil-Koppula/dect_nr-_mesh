@@ -94,3 +94,18 @@ bool storage_exists(uint16_t key)
 	uint8_t tmp;
 	return nvs_read(&nvs, key, &tmp, sizeof(tmp)) > 0;
 }
+
+int storage_clear_all(void)
+{
+	if (!nvs_ready) {
+		return -ENODEV;
+	}
+
+	int err = nvs_clear(&nvs);
+	if (err) {
+		return err;
+	}
+
+	/* Re-mount after clear */
+	return nvs_mount(&nvs);
+}
