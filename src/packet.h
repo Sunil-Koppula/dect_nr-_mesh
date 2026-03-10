@@ -44,22 +44,24 @@ typedef struct {
 
 #define PAIR_REQUEST_PACKET_SIZE sizeof(pair_request_packet_t)
 
-/* Pairing Response Packet (9 bytes) */
+/* Pairing Response Packet (11 bytes) — unicast to requester */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
-	uint16_t device_id;
+	uint16_t device_id;         /* responder's ID */
+	uint16_t dst_device_id;     /* requester's ID (unicast target) */
 	uint32_t hash;
 	uint8_t hop_num;
 } __attribute__((packed)) pair_response_packet_t;
 
 #define PAIR_RESPONSE_PACKET_SIZE sizeof(pair_response_packet_t)
 
-/* Pairing Confirm Packet (4 bytes) — sent by sensor/anchor after receiving response */
+/* Pairing Confirm Packet (7 bytes) — unicast to responder */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
-	uint16_t device_id;
+	uint16_t device_id;         /* confirmer's ID */
+	uint16_t dst_device_id;     /* responder's ID (unicast target) */
 	uint8_t status;             /* PAIR_STATUS_SUCCESS / PAIR_STATUS_FAILURE */
 } __attribute__((packed)) pair_confirm_packet_t;
 

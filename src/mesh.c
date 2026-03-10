@@ -27,8 +27,9 @@ void discovery_add_response(const pair_response_packet_t *pkt, int16_t rssi_2)
 		return;
 	}
 
-	/* Sensors can only pair with gateways or anchors */
-	if (my_device_type == DEVICE_TYPE_SENSOR &&
+	/* Sensors and anchors can only pair with gateways or anchors */
+	if ((my_device_type == DEVICE_TYPE_SENSOR ||
+	     my_device_type == DEVICE_TYPE_ANCHOR) &&
 	    pkt->device_type == DEVICE_TYPE_SENSOR) {
 		return;
 	}
@@ -117,18 +118,20 @@ int send_pair_response(uint32_t handle, uint16_t dst_id, uint32_t hash)
 		.packet_type = PACKET_TYPE_PAIR_RESPONSE,
 		.device_type = (uint8_t)my_device_type,
 		.device_id = device_id,
+		.dst_device_id = dst_id,
 		.hash = hash,
 		.hop_num = my_hop_num,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }
 
-int send_pair_confirm(uint32_t handle, uint8_t status)
+int send_pair_confirm(uint32_t handle, uint16_t dst_id, uint8_t status)
 {
 	pair_confirm_packet_t pkt = {
 		.packet_type = PACKET_TYPE_PAIR_CONFIRM,
 		.device_type = (uint8_t)my_device_type,
 		.device_id = device_id,
+		.dst_device_id = dst_id,
 		.status = status,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));

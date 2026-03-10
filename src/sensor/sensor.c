@@ -89,6 +89,10 @@ static int sensor_do_pairing(void)
 			    item.len >= PAIR_RESPONSE_PACKET_SIZE) {
 				const pair_response_packet_t *resp =
 					(const pair_response_packet_t *)item.data;
+				/* Only accept responses addressed to us */
+				if (resp->dst_device_id != device_id) {
+					continue;
+				}
 				discovery_add_response(resp, item.rssi_2);
 				LOG_INF("Got pair response from %s ID:%d hop:%d",
 					device_type_str(resp->device_type),
@@ -120,7 +124,8 @@ static int sensor_do_pairing(void)
 		}
 
 		/* Send pair confirm SUCCESS */
-		err = send_pair_confirm(SENSOR_TX_HANDLE, PAIR_STATUS_SUCCESS);
+		err = send_pair_confirm(SENSOR_TX_HANDLE, best->device_id,
+				       PAIR_STATUS_SUCCESS);
 		if (err) {
 			LOG_ERR("Failed to send pair confirm, err %d", err);
 			k_sleep(K_SECONDS(2));

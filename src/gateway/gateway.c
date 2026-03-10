@@ -164,6 +164,11 @@ static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2
 
 static void handle_pair_confirm(const pair_confirm_packet_t *pkt, int16_t rssi_2)
 {
+	/* Only accept confirms addressed to us */
+	if (pkt->dst_device_id != device_id) {
+		return;
+	}
+
 	LOG_INF("Pair confirm from %s ID:%d status:%s",
 		device_type_str(pkt->device_type), pkt->device_id,
 		(pkt->status == PAIR_STATUS_SUCCESS) ? "SUCCESS" : "FAILURE");
