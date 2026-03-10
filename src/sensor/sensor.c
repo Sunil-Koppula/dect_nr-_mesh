@@ -25,7 +25,6 @@ LOG_MODULE_DECLARE(app);
 #define SENSOR_RX_HANDLE 2
 
 #define PAIR_RETRY_MAX     5
-#define PAIR_LISTEN_TIMEOUT K_SECONDS(CONFIG_RX_PERIOD_S)
 
 /* === Sensor storage helpers === */
 
@@ -77,10 +76,13 @@ static int sensor_do_pairing(void)
 			continue;
 		}
 
-		/* Collect responses during the RX window */
+		/* Wait for RX window to complete naturally */
+		k_sem_take(&operation_sem, K_FOREVER);
+
+		/* RX done — drain all queued responses */
 		struct rx_queue_item item;
 
-		while (rx_queue_get(&item, PAIR_LISTEN_TIMEOUT) == 0) {
+		while (rx_queue_get(&item, K_NO_WAIT) == 0) {
 			if (item.len < 1) {
 				continue;
 			}
@@ -100,8 +102,7 @@ static int sensor_do_pairing(void)
 			}
 		}
 
-		/* Wait for RX operation to complete */
-		k_sem_take(&operation_sem, K_FOREVER);
+		k_sleep(K_MSEC(10));
 
 		if (discovery_count() == 0) {
 			LOG_WRN("No responses received, retrying...");

@@ -27,8 +27,8 @@ uint16_t device_id;
 device_type_t my_device_type = (device_type_t)CONFIG_DEVICE_TYPE;
 uint8_t my_hop_num;
 
-/* Factory reset: hold button 1 for 5 seconds */
-#define FACTORY_RESET_HOLD_MS 5000
+/* Factory reset: hold button 1 for 2 seconds */
+#define FACTORY_RESET_HOLD_MS 2000
 
 static int64_t btn1_press_time;
 
