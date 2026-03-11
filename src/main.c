@@ -30,6 +30,9 @@ uint8_t my_hop_num;
 /* Factory reset: hold button 1 for 2 seconds */
 #define FACTORY_RESET_HOLD_MS 2000
 
+/* Button 2: trigger sensor data send */
+K_SEM_DEFINE(btn2_sem, 0, 1);
+
 static int64_t btn1_press_time;
 
 static void button_handler(uint32_t button_state, uint32_t has_changed)
@@ -52,6 +55,11 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 				sys_reboot(SYS_REBOOT_COLD);
 			}
 		}
+	}
+
+	/* Button 2 press triggers data send */
+	if ((has_changed & DK_BTN2_MSK) && (button_state & DK_BTN2_MSK)) {
+		k_sem_give(&btn2_sem);
 	}
 }
 

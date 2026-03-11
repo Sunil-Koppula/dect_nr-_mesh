@@ -335,55 +335,73 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt, int16_t rssi_2
 
 static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 {
-	uint16_t payload_len = len - DATA_PACKET_SIZE;
-
-	LOG_INF("Data from ID:%d -> ID:%d (%d bytes, RSSI:%d)",
-		pkt->src_device_id, pkt->dst_device_id,
-		payload_len, rssi_2 / 2);
-
-	/* If data is addressed to us, ACK it and relay upstream to parent */
-	if (pkt->dst_device_id == device_id) {
-		/* ACK back to the sender */
-		data_ack_packet_t ack = {
-			.packet_type = PACKET_TYPE_DATA_ACK,
-			.src_device_id = device_id,
-			.dst_device_id = pkt->src_device_id,
-			.hop_num = my_hop_num,
-			.status = 0,
-		};
-
-		int err = transmit(ANCHOR_TX_HANDLE, &ack, sizeof(ack));
-		if (err) {
-			LOG_ERR("Failed to send data ACK, err %d", err);
-			return;
-		}
-		k_sem_take(&operation_sem, K_FOREVER);
-
-		LOG_DBG("Data ACK sent to ID:%d", pkt->src_device_id);
-
-		/* Relay data upstream to parent */
-		uint8_t relay_buf[DATA_LEN_MAX];
-		data_packet_t *relay = (data_packet_t *)relay_buf;
-
-		relay->packet_type = PACKET_TYPE_DATA;
-		relay->src_device_id = pkt->src_device_id;
-		relay->dst_device_id = parent_id;
-		if (payload_len > 0) {
-			memcpy(relay->payload, pkt->payload, payload_len);
-		}
-
-		err = transmit(ANCHOR_TX_HANDLE, relay_buf,
-			       DATA_PACKET_SIZE + payload_len);
-		if (err) {
-			LOG_ERR("Failed to relay data to parent ID:%d, err %d",
-				parent_id, err);
-			return;
-		}
-		k_sem_take(&operation_sem, K_FOREVER);
-
-		LOG_INF("Data relayed from ID:%d to parent ID:%d",
-			pkt->src_device_id, parent_id);
+	/* Only accept data addressed to us */
+	if (pkt->dst_device_id != device_id) {
+		return;
 	}
+
+	uint16_t payload_len = pkt->payload_len;
+
+	/* Verify CRC */
+	uint16_t rx_crc;
+	memcpy(&rx_crc, &pkt->payload[payload_len], sizeof(rx_crc));
+	uint16_t calc_crc = compute_crc16(pkt->payload, payload_len);
+	uint8_t status = (rx_crc == calc_crc) ? DATA_ACK_SUCCESS : DATA_ACK_CRC_FAIL;
+
+	if (status == DATA_ACK_SUCCESS) {
+		LOG_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
+			pkt->src_device_id, payload_len, rssi_2 / 2);
+	} else {
+		LOG_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
+			pkt->src_device_id, payload_len, rssi_2 / 2);
+	}
+
+	/* ACK back to the sender */
+	data_ack_packet_t ack = {
+		.packet_type = PACKET_TYPE_DATA_ACK,
+		.src_device_id = device_id,
+		.dst_device_id = pkt->src_device_id,
+		.hop_num = my_hop_num,
+		.status = status,
+	};
+
+	int err = transmit(ANCHOR_TX_HANDLE, &ack, sizeof(ack));
+	if (err) {
+		LOG_ERR("Failed to send data ACK, err %d", err);
+		return;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	LOG_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
+		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
+
+	/* Only relay upstream if CRC was good */
+	if (status != DATA_ACK_SUCCESS) {
+		return;
+	}
+
+	/* Relay data upstream to parent (payload + CRC intact) */
+	uint16_t relay_len = DATA_PACKET_SIZE + payload_len + DATA_CRC_SIZE;
+	uint8_t relay_buf[DATA_LEN_MAX];
+	data_packet_t *relay = (data_packet_t *)relay_buf;
+
+	relay->packet_type = PACKET_TYPE_DATA;
+	relay->src_device_id = device_id;
+	relay->dst_device_id = parent_id;
+	relay->payload_len = payload_len;
+	/* Copy payload + CRC together */
+	memcpy(relay->payload, pkt->payload, payload_len + DATA_CRC_SIZE);
+
+	err = transmit(ANCHOR_TX_HANDLE, relay_buf, relay_len);
+	if (err) {
+		LOG_ERR("Failed to relay data to parent ID:%d, err %d",
+			parent_id, err);
+		return;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	LOG_INF("Data relayed from ID:%d to parent ID:%d",
+		pkt->src_device_id, parent_id);
 }
 
 /* === Process all queued packets (called when RX window ends) === */
@@ -422,6 +440,10 @@ static void anchor_process_queue(void)
 					(const data_packet_t *)item.data,
 					item.len, item.rssi_2);
 			}
+			break;
+
+		case PACKET_TYPE_DATA_ACK:
+			/* Ignore — anchor doesn't need ACKs */
 			break;
 
 		default:

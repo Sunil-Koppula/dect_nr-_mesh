@@ -159,6 +159,70 @@ static int sensor_do_pairing(void)
 	return -ETIMEDOUT;
 }
 
+/* === Data transfer: send data to parent, check for ACK === */
+
+static uint16_t parent_id;
+static uint32_t tx_seq;
+
+static void sensor_send_data(void)
+{
+	/* Build a simple payload: sequence number + device_id */
+	struct {
+		uint32_t seq;
+		uint16_t sensor_id;
+	} __attribute__((packed)) payload = {
+		.seq = tx_seq++,
+		.sensor_id = device_id,
+	};
+
+	LOG_INF("Sending data seq:%d to parent ID:%d", payload.seq, parent_id);
+
+	int err = send_data(SENSOR_TX_HANDLE, parent_id,
+			    &payload, sizeof(payload));
+	if (err) {
+		LOG_ERR("Failed to send data, err %d", err);
+		return;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	/* Listen for ACK */
+	err = receive(SENSOR_RX_HANDLE);
+	if (err) {
+		LOG_ERR("Receive failed, err %d", err);
+		return;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	/* Drain queue and look for our ACK */
+	struct rx_queue_item item;
+	bool acked = false;
+
+	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+		if (item.len < DATA_ACK_PACKET_SIZE) {
+			continue;
+		}
+		if (item.data[0] != PACKET_TYPE_DATA_ACK) {
+			continue;
+		}
+		const data_ack_packet_t *ack =
+			(const data_ack_packet_t *)item.data;
+		if (ack->dst_device_id == device_id) {
+			if (ack->status == DATA_ACK_SUCCESS) {
+				LOG_INF("Data ACK from ID:%d: SUCCESS",
+					ack->src_device_id);
+			} else {
+				LOG_WRN("Data ACK from ID:%d: CRC FAIL",
+					ack->src_device_id);
+			}
+			acked = true;
+		}
+	}
+
+	if (!acked) {
+		LOG_WRN("No ACK received for seq:%d", payload.seq - 1);
+	}
+}
+
 /* === Sensor entry point === */
 
 void sensor_main(void)
@@ -170,6 +234,7 @@ void sensor_main(void)
 
 	if (sensor_has_identity() &&
 	    sensor_load_identity(&identity) == 0) {
+		parent_id = identity.parent_id;
 		LOG_INF("Already paired with parent ID:%d (parent hop:%d)",
 			identity.parent_id, identity.parent_hop);
 	} else {
@@ -179,8 +244,17 @@ void sensor_main(void)
 			LOG_ERR("Pairing failed, err %d", err);
 			return;
 		}
+		/* parent_id set by sensor_do_pairing via identity store */
+		if (sensor_load_identity(&identity) == 0) {
+			parent_id = identity.parent_id;
+		}
 	}
 
-	/* TODO: normal operation — send data to parent */
-	LOG_INF("Sensor paired and ready");
+	LOG_INF("Sensor ready, press button 2 to send data");
+
+	/* Wait for button 2 press to send data */
+	while (true) {
+		k_sem_take(&btn2_sem, K_FOREVER);
+		sensor_send_data();
+	}
 }

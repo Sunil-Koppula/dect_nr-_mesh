@@ -29,6 +29,10 @@ typedef enum {
 #define PAIR_STATUS_SUCCESS 0x00
 #define PAIR_STATUS_FAILURE 0x01
 
+/* Data ACK status codes */
+#define DATA_ACK_SUCCESS  0x00
+#define DATA_ACK_CRC_FAIL 0x01
+
 /* Max application data length per PHY subslot */
 #define DATA_LEN_MAX 32
 
@@ -67,15 +71,21 @@ typedef struct {
 
 #define PAIR_CONFIRM_PACKET_SIZE sizeof(pair_confirm_packet_t)
 
-/* Data Packet (5 bytes header + variable payload) */
+/* Data Packet (6 bytes header + variable payload + 2 bytes CRC16)
+ * Wire format: [header][payload][crc16][padding...]
+ * CRC16 is computed over the payload bytes only.
+ * payload_len tells receiver the actual payload size (PHY pads to subslot).
+ */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint16_t src_device_id;
 	uint16_t dst_device_id;
-	uint8_t payload[0];
+	uint8_t payload_len;        /* actual payload length */
+	uint8_t payload[0];         /* followed by uint16_t crc16 */
 } __attribute__((packed)) data_packet_t;
 
 #define DATA_PACKET_SIZE sizeof(data_packet_t)
+#define DATA_CRC_SIZE    2  /* uint16_t CRC16 appended after payload */
 
 /* Data Acknowledgment Packet (7 bytes) */
 typedef struct {

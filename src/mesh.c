@@ -2,6 +2,7 @@
  * Mesh protocol shared utilities for DECT NR+ mesh network
  */
 
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
@@ -87,6 +88,25 @@ int discovery_count(void)
 	return candidate_count;
 }
 
+/* CRC-16/CCITT (polynomial 0x1021) */
+uint16_t compute_crc16(const void *data, uint16_t len)
+{
+	const uint8_t *p = data;
+	uint16_t crc = 0xFFFF;
+
+	for (uint16_t i = 0; i < len; i++) {
+		crc ^= (uint16_t)p[i] << 8;
+		for (int j = 0; j < 8; j++) {
+			if (crc & 0x8000) {
+				crc = (crc << 1) ^ 0x1021;
+			} else {
+				crc <<= 1;
+			}
+		}
+	}
+	return crc;
+}
+
 uint32_t compute_pair_hash(uint16_t dev_id, uint32_t random_num)
 {
 	uint32_t h = (uint32_t)dev_id ^ random_num;
@@ -135,4 +155,30 @@ int send_pair_confirm(uint32_t handle, uint16_t dst_id, uint8_t status)
 		.status = status,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
+}
+
+int send_data(uint32_t handle, uint16_t dst_id, const void *payload,
+	      uint16_t payload_len)
+{
+	uint8_t buf[DATA_LEN_MAX];
+	data_packet_t *pkt = (data_packet_t *)buf;
+	uint16_t total = DATA_PACKET_SIZE + payload_len + DATA_CRC_SIZE;
+
+	if (total > DATA_LEN_MAX) {
+		return -EINVAL;
+	}
+
+	pkt->packet_type = PACKET_TYPE_DATA;
+	pkt->src_device_id = device_id;
+	pkt->dst_device_id = dst_id;
+	pkt->payload_len = payload_len;
+	if (payload_len > 0) {
+		memcpy(pkt->payload, payload, payload_len);
+	}
+
+	/* Append CRC16 over payload */
+	uint16_t crc = compute_crc16(pkt->payload, payload_len);
+	memcpy(&pkt->payload[payload_len], &crc, sizeof(crc));
+
+	return transmit(handle, buf, total);
 }

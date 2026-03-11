@@ -9,6 +9,7 @@
  * This avoids modem scheduling conflicts since TX and RX never overlap.
  */
 
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
@@ -205,18 +206,33 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt, int16_t rssi_2
 
 static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 {
-	uint16_t payload_len = len - DATA_PACKET_SIZE;
+	/* Only accept data addressed to us */
+	if (pkt->dst_device_id != device_id) {
+		return;
+	}
 
-	LOG_INF("Data from ID:%d -> ID:%d (%d bytes, RSSI:%d)",
-		pkt->src_device_id, pkt->dst_device_id,
-		payload_len, rssi_2 / 2);
+	uint16_t payload_len = pkt->payload_len;
+
+	/* Verify CRC */
+	uint16_t rx_crc;
+	memcpy(&rx_crc, &pkt->payload[payload_len], sizeof(rx_crc));
+	uint16_t calc_crc = compute_crc16(pkt->payload, payload_len);
+	uint8_t status = (rx_crc == calc_crc) ? DATA_ACK_SUCCESS : DATA_ACK_CRC_FAIL;
+
+	if (status == DATA_ACK_SUCCESS) {
+		LOG_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
+			pkt->src_device_id, payload_len, rssi_2 / 2);
+	} else {
+		LOG_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
+			pkt->src_device_id, payload_len, rssi_2 / 2);
+	}
 
 	data_ack_packet_t ack = {
 		.packet_type = PACKET_TYPE_DATA_ACK,
 		.src_device_id = device_id,
 		.dst_device_id = pkt->src_device_id,
 		.hop_num = my_hop_num,
-		.status = 0,
+		.status = status,
 	};
 
 	int err = gw_transmit(&ack, sizeof(ack));
@@ -225,7 +241,8 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		return;
 	}
 
-	LOG_DBG("Data ACK sent to ID:%d", pkt->src_device_id);
+	LOG_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
+		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
 }
 
 /* === Process all queued packets (called when RX window ends) === */
@@ -264,6 +281,10 @@ static void gw_process_queue(void)
 					(const data_packet_t *)item.data,
 					item.len, item.rssi_2);
 			}
+			break;
+
+		case PACKET_TYPE_DATA_ACK:
+			/* Ignore — gateway doesn't need ACKs */
 			break;
 
 		default:
