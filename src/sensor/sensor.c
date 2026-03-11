@@ -185,8 +185,8 @@ static void sensor_send_data(void)
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
 
-	/* Listen for ACK */
-	err = receive(SENSOR_RX_HANDLE);
+	/* Listen for ACK (short window) */
+	err = receive_ms(SENSOR_RX_HANDLE, 5000);
 	if (err) {
 		LOG_ERR("Receive failed, err %d", err);
 		return;

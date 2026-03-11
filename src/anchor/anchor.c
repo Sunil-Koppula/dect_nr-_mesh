@@ -443,7 +443,19 @@ static void anchor_process_queue(void)
 			break;
 
 		case PACKET_TYPE_DATA_ACK:
-			/* Ignore — anchor doesn't need ACKs */
+			if (item.len >= DATA_ACK_PACKET_SIZE) {
+				const data_ack_packet_t *ack =
+					(const data_ack_packet_t *)item.data;
+				if (ack->dst_device_id == device_id) {
+					if (ack->status == DATA_ACK_SUCCESS) {
+						LOG_INF("Parent ACK from ID:%d: SUCCESS",
+							ack->src_device_id);
+					} else {
+						LOG_WRN("Parent ACK from ID:%d: CRC FAIL",
+							ack->src_device_id);
+					}
+				}
+			}
 			break;
 
 		default:

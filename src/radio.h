@@ -43,4 +43,7 @@ int transmit(uint32_t handle, void *data, size_t data_len);
 /* Start receiving on the PHY */
 int receive(uint32_t handle);
 
+/* Start receiving with custom duration (milliseconds) */
+int receive_ms(uint32_t handle, uint32_t duration_ms);
+
 #endif /* RADIO_H */

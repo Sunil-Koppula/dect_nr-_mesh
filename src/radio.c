@@ -221,3 +221,23 @@ int receive(uint32_t handle)
 
 	return nrf_modem_dect_phy_rx(&rx_op_params);
 }
+
+int receive_ms(uint32_t handle, uint32_t duration_ms)
+{
+	struct nrf_modem_dect_phy_rx_params rx_op_params = {
+		.start_time = 0,
+		.handle = handle,
+		.network_id = CONFIG_NETWORK_ID,
+		.mode = NRF_MODEM_DECT_PHY_RX_MODE_CONTINUOUS,
+		.rssi_interval = NRF_MODEM_DECT_PHY_RSSI_INTERVAL_OFF,
+		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
+		.rssi_level = -60,
+		.carrier = CONFIG_CARRIER,
+		.duration = duration_ms * NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
+		.filter.short_network_id = CONFIG_NETWORK_ID & 0xff,
+		.filter.is_short_network_id_used = 1,
+		.filter.receiver_identity = 0,
+	};
+
+	return nrf_modem_dect_phy_rx(&rx_op_params);
+}
