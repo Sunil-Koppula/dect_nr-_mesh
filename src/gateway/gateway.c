@@ -295,6 +295,7 @@ static void gw_process_queue(void)
 			break;
 
 		case PACKET_TYPE_LARGE_DATA_ACK:
+		case PACKET_TYPE_LARGE_DATA_NACK:
 			/* Ignore — gateway doesn't send large data */
 			break;
 
@@ -345,8 +346,27 @@ void gateway_main(void)
 		/* RX done — now process all queued packets and TX responses */
 		gw_process_queue();
 
-		/* Send any pending large data ACK */
+		/* Send any pending large data ACKs */
 		large_data_send_pending_ack(GW_TX_HANDLE);
+
+		/* Free completed sessions (gateway is the final destination) */
+		{
+			uint8_t *ld_data;
+			uint32_t ld_size;
+			uint8_t ld_file_type;
+			uint16_t ld_src_id;
+
+			while (large_data_get_completed(&ld_data, &ld_size,
+							&ld_file_type, &ld_src_id)) {
+				LOG_INF("Large data received: %d bytes from ID:%d type:%d",
+					ld_size, ld_src_id, ld_file_type);
+				large_data_free_completed(ld_src_id);
+			}
+		}
+
+		/* Drain any extra large_data_end_sem gives */
+		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+		}
 
 		/* After cancel, drain any stale sem gives before next RX */
 		if (cancelled) {

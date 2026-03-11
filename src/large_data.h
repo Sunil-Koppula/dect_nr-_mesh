@@ -46,6 +46,7 @@ typedef struct {
 	uint16_t crc16;             /* expected CRC (from INIT) */
 	uint16_t frags_received;    /* count of fragments received */
 	uint8_t *buffer;            /* reassembly buffer (heap allocated) */
+	uint8_t *frag_bitmap;       /* bitmap tracking received fragments */
 } large_data_rx_session_t;
 
 /* Initialize large data module */
@@ -72,6 +73,16 @@ void large_data_send_pending_ack(uint32_t tx_handle);
 /* Semaphore signaled when END is processed and ACK needs to be sent.
  * Main loop should check this to break out of RX early. */
 extern struct k_sem large_data_end_sem;
+
+/* Retrieve a completed large data session (after ACK SUCCESS was sent).
+ * Returns the reassembled data buffer, size, file type, and sender ID.
+ * The caller must call large_data_free_completed() when done with the data.
+ * Returns true if a completed session was found, false otherwise. */
+bool large_data_get_completed(uint8_t **data, uint32_t *size,
+			      uint8_t *file_type, uint16_t *src_id);
+
+/* Free a completed session after relay/processing is done */
+void large_data_free_completed(uint16_t src_id);
 
 /* --- Sender API --- */
 

@@ -466,6 +466,7 @@ static void anchor_process_queue(void)
 			break;
 
 		case PACKET_TYPE_LARGE_DATA_ACK:
+		case PACKET_TYPE_LARGE_DATA_NACK:
 			/* Ignore */
 			break;
 
@@ -534,8 +535,35 @@ void anchor_main(void)
 
 		anchor_process_queue();
 
-		/* Send any pending large data ACK */
+		/* Send any pending large data ACKs */
 		large_data_send_pending_ack(ANCHOR_TX_HANDLE);
+
+		/* Relay completed large data to parent */
+		uint8_t *ld_data;
+		uint32_t ld_size;
+		uint8_t ld_file_type;
+		uint16_t ld_src_id;
+
+		while (large_data_get_completed(&ld_data, &ld_size,
+						&ld_file_type, &ld_src_id)) {
+			LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d",
+				ld_size, ld_src_id, parent_id);
+			int relay_err = large_data_send(
+				ANCHOR_TX_HANDLE, ANCHOR_RX_HANDLE,
+				parent_id, ld_file_type,
+				ld_data, ld_size);
+			if (relay_err) {
+				LOG_ERR("Failed to relay large data, err %d",
+					relay_err);
+			} else {
+				LOG_INF("Large data relay to parent complete");
+			}
+			large_data_free_completed(ld_src_id);
+		}
+
+		/* Drain any extra large_data_end_sem gives */
+		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+		}
 
 		/* After cancel, drain any stale sem gives before next RX */
 		if (cancelled) {

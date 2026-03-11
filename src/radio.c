@@ -16,6 +16,7 @@ K_SEM_DEFINE(operation_sem, 0, 1);
 K_SEM_DEFINE(deinit_sem, 0, 1);
 
 bool exit_flag;
+volatile int last_op_err;
 
 struct nrf_modem_dect_phy_config_params dect_phy_config_params = {
 	.band_group_index = ((CONFIG_CARRIER >= 525 && CONFIG_CARRIER <= 551)) ? 1 : 0,
@@ -86,6 +87,7 @@ static void on_op_complete(const struct nrf_modem_dect_phy_op_complete_event *ev
 	if (evt->err) {
 		LOG_WRN("op_complete handle %d err %d", evt->handle, evt->err);
 	}
+	last_op_err = evt->err;
 	k_sem_give(&operation_sem);
 }
 
@@ -112,34 +114,45 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 	}
 
 	/*
+	 * Copy event data to local buffer before processing.
+	 * The modem may reuse evt->data for the next PDC event,
+	 * so we must snapshot it before any processing that reads
+	 * from the payload (e.g. memcpy into reassembly buffer).
+	 */
+	uint8_t local_buf[DATA_LEN_MAX];
+	uint16_t copy_len = evt->len <= DATA_LEN_MAX ? evt->len : DATA_LEN_MAX;
+
+	memcpy(local_buf, evt->data, copy_len);
+
+	uint8_t pkt_type = local_buf[0];
+
+	/*
 	 * Process all large data packets directly in ISR context:
 	 * - INIT: k_heap_alloc(K_NO_WAIT), ISR-safe
 	 * - TRANSFER: memcpy into reassembly buffer, ISR-safe
 	 * - END: CRC verify + queue pending ACK, signals main thread
 	 *        via large_data_end_sem to cancel RX and send ACK
 	 */
-	uint8_t pkt_type = ((const uint8_t *)evt->data)[0];
-
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_INIT &&
-	    evt->len >= LARGE_DATA_INIT_PACKET_SIZE) {
+	    copy_len >= LARGE_DATA_INIT_PACKET_SIZE) {
 		large_data_handle_init(
-			(const large_data_init_packet_t *)evt->data);
+			(const large_data_init_packet_t *)local_buf);
 		return;
 	}
 
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_TRANSFER &&
-	    evt->len >= LARGE_DATA_TRANSFER_PACKET_SIZE) {
+	    copy_len >= LARGE_DATA_TRANSFER_PACKET_SIZE) {
 		large_data_handle_transfer(
-			(const large_data_transfer_packet_t *)evt->data,
-			evt->len);
+			(const large_data_transfer_packet_t *)local_buf,
+			copy_len);
 		return;
 	}
 
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_END &&
-	    evt->len >= LARGE_DATA_END_PACKET_SIZE) {
+	    copy_len >= LARGE_DATA_END_PACKET_SIZE) {
 		large_data_handle_end(
-			(const large_data_end_packet_t *)evt->data,
-			evt->len);
+			(const large_data_end_packet_t *)local_buf,
+			copy_len);
 		return;
 	}
 

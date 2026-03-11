@@ -27,6 +27,7 @@ typedef enum {
 	PACKET_TYPE_LARGE_DATA_TRANSFER = 0x07,
 	PACKET_TYPE_LARGE_DATA_END	  	= 0x08,
 	PACKET_TYPE_LARGE_DATA_ACK      = 0x09,
+	PACKET_TYPE_LARGE_DATA_NACK     = 0x0A,
 } packet_type_t;
 
 /* Pairing confirm status codes */
@@ -159,6 +160,20 @@ typedef struct {
 } __attribute__((packed)) large_data_ack_packet_t;
 
 #define LARGE_DATA_ACK_PACKET_SIZE sizeof(large_data_ack_packet_t)
+
+/* Large Data NACK — request retransmission of missing fragments */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_NACK */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t frag_count;         /* number of missing fragment numbers following */
+	uint16_t frag_nums[0];      /* missing fragment numbers */
+} __attribute__((packed)) large_data_nack_packet_t;
+
+#define LARGE_DATA_NACK_PACKET_SIZE sizeof(large_data_nack_packet_t)
+/* Max missing frags per NACK packet */
+#define LARGE_DATA_NACK_MAX_FRAGS \
+	((DATA_LEN_MAX - LARGE_DATA_NACK_PACKET_SIZE) / sizeof(uint16_t))
 
 /* Get device type as string */
 static inline const char *device_type_str(device_type_t type)

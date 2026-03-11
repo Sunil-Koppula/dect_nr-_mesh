@@ -31,6 +31,9 @@ extern struct k_sem deinit_sem;
 /* Set when PHY init/activate fails */
 extern bool exit_flag;
 
+/* Last op_complete error code (set by callback) */
+extern volatile int last_op_err;
+
 /* PHY event handler */
 void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt);
 
