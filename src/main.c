@@ -64,12 +64,12 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 		k_sem_give(&btn2_sem);
 	}
 
-	/* Button 3 press triggers 25KB large data send */
+	/* Button 3 press triggers 50KB large data send */
 	if ((has_changed & DK_BTN3_MSK) && (button_state & DK_BTN3_MSK)) {
 		k_sem_give(&btn3_sem);
 	}
 
-	/* Button 4 press triggers 10KB large data send */
+	/* Button 4 press triggers 75KB large data send */
 	if ((has_changed & DK_BTN4_MSK) && (button_state & DK_BTN4_MSK)) {
 		k_sem_give(&btn4_sem);
 	}

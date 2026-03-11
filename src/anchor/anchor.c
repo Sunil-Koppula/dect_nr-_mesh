@@ -20,26 +20,40 @@
 #include "../mesh.h"
 #include "../state.h"
 #include "../storage.h"
+#include "../paired_store.h"
 #include "../large_data.h"
 
 LOG_MODULE_DECLARE(app);
 
-#define ANCHOR_TX_HANDLE 1
-#define ANCHOR_RX_HANDLE 2
+#define TX_HANDLE 1
+#define RX_HANDLE 2
 
 #define PAIR_RETRY_MAX      5
 
 /* Parent info (loaded from NVM or set during pairing) */
 static uint16_t parent_id;
 
-/* === Anchor storage helpers === */
+/* Paired device stores */
+static const paired_store_t anchor_store = {
+	.nvs_base = ANCHOR_ANCHOR_BASE,
+	.max_entries = ANCHOR_ANCHOR_MAX,
+	.label = "Anchor",
+};
 
-int anchor_store_identity(const anchor_identity_t *id)
+static const paired_store_t sensor_store = {
+	.nvs_base = ANCHOR_SENSOR_BASE,
+	.max_entries = ANCHOR_SENSOR_MAX,
+	.label = "Sensor",
+};
+
+/* === Anchor identity helpers === */
+
+int anchor_store_identity(const node_identity_t *id)
 {
 	return storage_write(ANCHOR_IDENTITY_KEY, id, sizeof(*id));
 }
 
-int anchor_load_identity(anchor_identity_t *id)
+int anchor_load_identity(node_identity_t *id)
 {
 	return storage_read(ANCHOR_IDENTITY_KEY, id, sizeof(*id));
 }
@@ -49,115 +63,17 @@ bool anchor_has_identity(void)
 	return storage_exists(ANCHOR_IDENTITY_KEY);
 }
 
-static int find_slot(uint16_t base, int max, uint16_t dev_id, bool *found)
+/* === TX helper: transmit and wait for completion === */
+
+static int transmit_and_wait(void *data, size_t len)
 {
-	uint16_t stored;
-	int first_empty = -1;
+	int err = transmit(TX_HANDLE, data, len);
 
-	*found = false;
-	for (int i = 0; i < max; i++) {
-		if (storage_read(base + i, &stored, sizeof(stored)) == 0) {
-			if (stored == dev_id) {
-				*found = true;
-				return i;
-			}
-		} else if (first_empty < 0) {
-			first_empty = i;
-		}
+	if (err) {
+		return err;
 	}
-	return first_empty;
-}
-
-int anchor_store_anchor(uint16_t anchor_id)
-{
-	bool found;
-	int slot = find_slot(ANCHOR_ANCHOR_BASE, ANCHOR_ANCHOR_MAX, anchor_id, &found);
-	if (found) {
-		return 0;
-	}
-	if (slot < 0) {
-		LOG_WRN("Anchor storage full");
-		return -ENOMEM;
-	}
-	return storage_write(ANCHOR_ANCHOR_BASE + slot, &anchor_id, sizeof(anchor_id));
-}
-
-int anchor_store_sensor(uint16_t sensor_id)
-{
-	bool found;
-	int slot = find_slot(ANCHOR_SENSOR_BASE, ANCHOR_SENSOR_MAX, sensor_id, &found);
-	if (found) {
-		return 0;
-	}
-	if (slot < 0) {
-		LOG_WRN("Sensor storage full");
-		return -ENOMEM;
-	}
-	return storage_write(ANCHOR_SENSOR_BASE + slot, &sensor_id, sizeof(sensor_id));
-}
-
-bool anchor_is_anchor_paired(uint16_t anchor_id)
-{
-	bool found;
-	find_slot(ANCHOR_ANCHOR_BASE, ANCHOR_ANCHOR_MAX, anchor_id, &found);
-	return found;
-}
-
-bool anchor_is_sensor_paired(uint16_t sensor_id)
-{
-	bool found;
-	find_slot(ANCHOR_SENSOR_BASE, ANCHOR_SENSOR_MAX, sensor_id, &found);
-	return found;
-}
-
-int anchor_get_anchor_count(void)
-{
-	int count = 0;
-	uint16_t tmp;
-	for (int i = 0; i < ANCHOR_ANCHOR_MAX; i++) {
-		if (storage_read(ANCHOR_ANCHOR_BASE + i, &tmp, sizeof(tmp)) == 0) {
-			count++;
-		}
-	}
-	return count;
-}
-
-int anchor_get_sensor_count(void)
-{
-	int count = 0;
-	uint16_t tmp;
-	for (int i = 0; i < ANCHOR_SENSOR_MAX; i++) {
-		if (storage_read(ANCHOR_SENSOR_BASE + i, &tmp, sizeof(tmp)) == 0) {
-			count++;
-		}
-	}
-	return count;
-}
-
-void anchor_print_paired(void)
-{
-	uint16_t id;
-
-	anchor_identity_t self;
-	if (anchor_load_identity(&self) == 0) {
-		LOG_INF("Anchor: ID:%d parent:%d parent_hop:%d my_hop:%d",
-			self.device_id, self.parent_id, self.parent_hop,
-			self.parent_hop + 1);
-	}
-
-	LOG_INF("=== Child Anchors (%d) ===", anchor_get_anchor_count());
-	for (int i = 0; i < ANCHOR_ANCHOR_MAX; i++) {
-		if (storage_read(ANCHOR_ANCHOR_BASE + i, &id, sizeof(id)) == 0) {
-			LOG_INF("  [%d] Anchor ID:%d", i, id);
-		}
-	}
-
-	LOG_INF("=== Child Sensors (%d) ===", anchor_get_sensor_count());
-	for (int i = 0; i < ANCHOR_SENSOR_MAX; i++) {
-		if (storage_read(ANCHOR_SENSOR_BASE + i, &id, sizeof(id)) == 0) {
-			LOG_INF("  [%d] Sensor ID:%d", i, id);
-		}
-	}
+	k_sem_take(&operation_sem, K_FOREVER);
+	return 0;
 }
 
 /* === Pairing: anchor pairs with a parent (gateway or another anchor) === */
@@ -172,7 +88,7 @@ static int anchor_do_pairing(void)
 		uint32_t rand_num = next_random();
 		uint32_t expected_hash = compute_pair_hash(device_id, rand_num);
 
-		err = send_pair_request(ANCHOR_TX_HANDLE, rand_num);
+		err = send_pair_request(TX_HANDLE, rand_num);
 		if (err) {
 			LOG_ERR("Failed to send pair request, err %d", err);
 			k_sleep(K_SECONDS(2));
@@ -184,7 +100,7 @@ static int anchor_do_pairing(void)
 
 		discovery_reset();
 
-		err = receive(ANCHOR_RX_HANDLE);
+		err = receive(RX_HANDLE);
 		if (err) {
 			LOG_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(2));
@@ -237,7 +153,7 @@ static int anchor_do_pairing(void)
 			continue;
 		}
 
-		err = send_pair_confirm(ANCHOR_TX_HANDLE, best->device_id,
+		err = send_pair_confirm(TX_HANDLE, best->device_id,
 				       PAIR_STATUS_SUCCESS);
 		if (err) {
 			LOG_ERR("Failed to send pair confirm, err %d", err);
@@ -247,7 +163,7 @@ static int anchor_do_pairing(void)
 		k_sem_take(&operation_sem, K_FOREVER);
 
 		/* Store identity in NVM */
-		anchor_identity_t identity = {
+		node_identity_t identity = {
 			.device_id = device_id,
 			.device_type = DEVICE_TYPE_ANCHOR,
 			.parent_id = best->device_id,
@@ -283,7 +199,7 @@ static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2
 
 	uint32_t hash = compute_pair_hash(pkt->device_id, pkt->random_num);
 
-	int err = send_pair_response(ANCHOR_TX_HANDLE, pkt->device_id, hash);
+	int err = send_pair_response(TX_HANDLE, pkt->device_id, hash);
 	if (err) {
 		LOG_ERR("Failed to send pair response, err %d", err);
 		return;
@@ -293,7 +209,7 @@ static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2
 	LOG_INF("Pair response sent to ID:%d", pkt->device_id);
 }
 
-static void handle_pair_confirm(const pair_confirm_packet_t *pkt, int16_t rssi_2)
+static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 {
 	/* Only accept confirms addressed to us */
 	if (pkt->dst_device_id != device_id) {
@@ -308,29 +224,26 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt, int16_t rssi_2
 		return;
 	}
 
-	int err;
+	const paired_store_t *store;
 
 	if (pkt->device_type == DEVICE_TYPE_SENSOR) {
-		err = anchor_store_sensor(pkt->device_id);
-		if (err) {
-			LOG_ERR("Failed to store sensor ID:%d, err %d",
-				pkt->device_id, err);
-		} else {
-			LOG_INF("Sensor ID:%d paired and stored in NVM",
-				pkt->device_id);
-		}
+		store = &sensor_store;
 	} else if (pkt->device_type == DEVICE_TYPE_ANCHOR) {
-		err = anchor_store_anchor(pkt->device_id);
-		if (err) {
-			LOG_ERR("Failed to store anchor ID:%d, err %d",
-				pkt->device_id, err);
-		} else {
-			LOG_INF("Anchor ID:%d paired and stored in NVM",
-				pkt->device_id);
-		}
+		store = &anchor_store;
 	} else {
 		LOG_WRN("Unexpected device type %d in pair confirm",
 			pkt->device_type);
+		return;
+	}
+
+	int err = paired_store_add(store, pkt->device_id);
+
+	if (err) {
+		LOG_ERR("Failed to store %s ID:%d, err %d",
+			store->label, pkt->device_id, err);
+	} else {
+		LOG_INF("%s ID:%d paired and stored in NVM",
+			store->label, pkt->device_id);
 	}
 }
 
@@ -366,12 +279,12 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		.status = status,
 	};
 
-	int err = transmit(ANCHOR_TX_HANDLE, &ack, sizeof(ack));
+	int err = transmit_and_wait(&ack, sizeof(ack));
+
 	if (err) {
 		LOG_ERR("Failed to send data ACK, err %d", err);
 		return;
 	}
-	k_sem_take(&operation_sem, K_FOREVER);
 
 	LOG_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
 		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
@@ -390,16 +303,15 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	relay->src_device_id = device_id;
 	relay->dst_device_id = parent_id;
 	relay->payload_len = payload_len;
-	/* Copy payload + CRC together */
 	memcpy(relay->payload, pkt->payload, payload_len + DATA_CRC_SIZE);
 
-	err = transmit(ANCHOR_TX_HANDLE, relay_buf, relay_len);
+	err = transmit_and_wait(relay_buf, relay_len);
+
 	if (err) {
 		LOG_ERR("Failed to relay data to parent ID:%d, err %d",
 			parent_id, err);
 		return;
 	}
-	k_sem_take(&operation_sem, K_FOREVER);
 
 	LOG_INF("Data relayed from ID:%d to parent ID:%d",
 		pkt->src_device_id, parent_id);
@@ -407,7 +319,7 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 
 /* === Process all queued packets (called when RX window ends) === */
 
-static void anchor_process_queue(void)
+static void process_queue(void)
 {
 	struct rx_queue_item item;
 
@@ -430,8 +342,7 @@ static void anchor_process_queue(void)
 		case PACKET_TYPE_PAIR_CONFIRM:
 			if (item.len >= PAIR_CONFIRM_PACKET_SIZE) {
 				handle_pair_confirm(
-					(const pair_confirm_packet_t *)item.data,
-					item.rssi_2);
+					(const pair_confirm_packet_t *)item.data);
 			}
 			break;
 
@@ -484,7 +395,7 @@ void anchor_main(void)
 	LOG_INF("Anchor mode started (ID:%d)", device_id);
 
 	/* Check if already paired with a parent */
-	anchor_identity_t identity;
+	node_identity_t identity;
 
 	if (anchor_has_identity() &&
 	    anchor_load_identity(&identity) == 0) {
@@ -501,12 +412,19 @@ void anchor_main(void)
 		}
 	}
 
-	anchor_print_paired();
+	node_identity_t self;
+	if (anchor_load_identity(&self) == 0) {
+		LOG_INF("Anchor: ID:%d parent:%d parent_hop:%d my_hop:%d",
+			self.device_id, self.parent_id, self.parent_hop,
+			self.parent_hop + 1);
+	}
+	paired_store_print(&anchor_store);
+	paired_store_print(&sensor_store);
 	large_data_init();
 
 	/* RX loop — receive from children, respond and relay */
 	while (true) {
-		int err = receive(ANCHOR_RX_HANDLE);
+		int err = receive(RX_HANDLE);
 		if (err) {
 			LOG_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(1));
@@ -522,7 +440,7 @@ void anchor_main(void)
 			}
 			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
 				/* END arrived — cancel RX to send ACK now */
-				nrf_modem_dect_phy_cancel(ANCHOR_RX_HANDLE);
+				nrf_modem_dect_phy_cancel(RX_HANDLE);
 				/* Cancel generates on_op_complete + on_cancel.
 				 * Wait for both callbacks to fire. */
 				k_sem_take(&operation_sem, K_FOREVER);
@@ -533,10 +451,10 @@ void anchor_main(void)
 			}
 		}
 
-		anchor_process_queue();
+		process_queue();
 
 		/* Send any pending large data ACKs */
-		large_data_send_pending_ack(ANCHOR_TX_HANDLE);
+		large_data_send_pending_ack(TX_HANDLE);
 
 		/* Relay completed large data to parent */
 		uint8_t *ld_data;
@@ -549,7 +467,7 @@ void anchor_main(void)
 			LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d",
 				ld_size, ld_src_id, parent_id);
 			int relay_err = large_data_send(
-				ANCHOR_TX_HANDLE, ANCHOR_RX_HANDLE,
+				TX_HANDLE, RX_HANDLE,
 				parent_id, ld_file_type,
 				ld_data, ld_size);
 			if (relay_err) {

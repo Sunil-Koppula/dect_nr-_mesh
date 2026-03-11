@@ -23,19 +23,19 @@
 
 LOG_MODULE_DECLARE(app);
 
-#define SENSOR_TX_HANDLE 1
-#define SENSOR_RX_HANDLE 2
+#define TX_HANDLE 1
+#define RX_HANDLE 2
 
 #define PAIR_RETRY_MAX     5
 
-/* === Sensor storage helpers === */
+/* === Sensor identity helpers === */
 
-int sensor_store_identity(const sensor_identity_t *id)
+int sensor_store_identity(const node_identity_t *id)
 {
 	return storage_write(SENSOR_IDENTITY_KEY, id, sizeof(*id));
 }
 
-int sensor_load_identity(sensor_identity_t *id)
+int sensor_load_identity(node_identity_t *id)
 {
 	return storage_read(SENSOR_IDENTITY_KEY, id, sizeof(*id));
 }
@@ -58,7 +58,7 @@ static int sensor_do_pairing(void)
 		uint32_t rand_num = next_random();
 		uint32_t expected_hash = compute_pair_hash(device_id, rand_num);
 
-		err = send_pair_request(SENSOR_TX_HANDLE, rand_num);
+		err = send_pair_request(TX_HANDLE, rand_num);
 		if (err) {
 			LOG_ERR("Failed to send pair request, err %d", err);
 			k_sleep(K_SECONDS(2));
@@ -71,7 +71,7 @@ static int sensor_do_pairing(void)
 		/* Start receiving to collect pair responses */
 		discovery_reset();
 
-		err = receive(SENSOR_RX_HANDLE);
+		err = receive(RX_HANDLE);
 		if (err) {
 			LOG_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(2));
@@ -127,7 +127,7 @@ static int sensor_do_pairing(void)
 		}
 
 		/* Send pair confirm SUCCESS */
-		err = send_pair_confirm(SENSOR_TX_HANDLE, best->device_id,
+		err = send_pair_confirm(TX_HANDLE, best->device_id,
 				       PAIR_STATUS_SUCCESS);
 		if (err) {
 			LOG_ERR("Failed to send pair confirm, err %d", err);
@@ -137,7 +137,7 @@ static int sensor_do_pairing(void)
 		k_sem_take(&operation_sem, K_FOREVER);
 
 		/* Store identity in NVM */
-		sensor_identity_t identity = {
+		node_identity_t identity = {
 			.device_id = device_id,
 			.device_type = DEVICE_TYPE_SENSOR,
 			.parent_id = best->device_id,
@@ -179,7 +179,7 @@ static void sensor_send_data(void)
 
 	LOG_INF("Sending data seq:%d to parent ID:%d", payload.seq, parent_id);
 
-	int err = send_data(SENSOR_TX_HANDLE, parent_id,
+	int err = send_data(TX_HANDLE, parent_id,
 			    &payload, sizeof(payload));
 	if (err) {
 		LOG_ERR("Failed to send data, err %d", err);
@@ -188,7 +188,7 @@ static void sensor_send_data(void)
 	k_sem_take(&operation_sem, K_FOREVER);
 
 	/* Listen for ACK (short window) */
-	err = receive_ms(SENSOR_RX_HANDLE, 5000);
+	err = receive_ms(RX_HANDLE, 5000);
 	if (err) {
 		LOG_ERR("Receive failed, err %d", err);
 		return;
@@ -232,7 +232,7 @@ void sensor_main(void)
 	LOG_INF("Sensor mode started (ID:%d)", device_id);
 
 	/* Check if already paired */
-	sensor_identity_t identity;
+	node_identity_t identity;
 
 	if (sensor_has_identity() &&
 	    sensor_load_identity(&identity) == 0) {
@@ -254,8 +254,8 @@ void sensor_main(void)
 
 	LOG_INF("Sensor ready:");
 	LOG_INF("  Button 2: send small data");
-	LOG_INF("  Button 3: send 20KB (0x5A)");
-	LOG_INF("  Button 4: send 10KB (0x10)");
+	LOG_INF("  Button 3: send 50KB (0x5A)");
+	LOG_INF("  Button 4: send 75KB (0x10)");
 
 	while (true) {
 		/* Check all button semaphores with short timeout */
@@ -264,34 +264,34 @@ void sensor_main(void)
 			continue;
 		}
 		if (k_sem_take(&btn3_sem, K_MSEC(50)) == 0) {
-			/* 20KB of 0x5A */
-			uint8_t *buf = k_malloc(20 * 1024);
+			/* 50KB of 0x5A */
+			uint8_t *buf = k_malloc(50 * 1024);
 			if (!buf) {
-				LOG_ERR("Failed to allocate 20KB buffer");
+				LOG_ERR("Failed to allocate 50KB buffer");
 				continue;
 			}
-			memset(buf, 0x5A, 20 * 1024);
-			LOG_INF("Sending 20KB of 0x5A to parent ID:%d",
+			memset(buf, 0x5A, 50 * 1024);
+			LOG_INF("Sending 50KB of 0x5A to parent ID:%d",
 				parent_id);
-			large_data_send(SENSOR_TX_HANDLE, SENSOR_RX_HANDLE,
+			large_data_send(TX_HANDLE, RX_HANDLE,
 					parent_id, LARGE_DATA_FILE_DATA,
-					buf, 20 * 1024);
+					buf, 50 * 1024);
 			k_free(buf);
 			continue;
 		}
 		if (k_sem_take(&btn4_sem, K_MSEC(50)) == 0) {
-			/* 10KB of 0x10 */
-			uint8_t *buf = k_malloc(10 * 1024);
+			/* 75KB of 0x10 */
+			uint8_t *buf = k_malloc(75 * 1024);
 			if (!buf) {
-				LOG_ERR("Failed to allocate 10KB buffer");
+				LOG_ERR("Failed to allocate 75KB buffer");
 				continue;
 			}
-			memset(buf, 0x10, 10 * 1024);
-			LOG_INF("Sending 10KB of 0x10 to parent ID:%d",
+			memset(buf, 0x10, 75 * 1024);
+			LOG_INF("Sending 75KB of 0x10 to parent ID:%d",
 				parent_id);
-			large_data_send(SENSOR_TX_HANDLE, SENSOR_RX_HANDLE,
+			large_data_send(TX_HANDLE, RX_HANDLE,
 					parent_id, LARGE_DATA_FILE_DATA,
-					buf, 10 * 1024);
+					buf, 75 * 1024);
 			k_free(buf);
 			continue;
 		}

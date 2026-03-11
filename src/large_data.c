@@ -18,6 +18,8 @@
 
 LOG_MODULE_DECLARE(app);
 
+#define RETRANSMIT_MAX 3
+
 /* ===== Receiver: reassembly sessions ===== */
 
 /*
@@ -256,32 +258,6 @@ void large_data_handle_end(const large_data_end_packet_t *pkt, uint16_t len)
 		}
 	}
 
-	/* Scan buffer for corrupted regions */
-	uint8_t expected_byte = s->buffer[0];
-	bool all_same = true;
-
-	for (uint32_t b = 1; b < s->total_size; b++) {
-		if (s->buffer[b] != expected_byte) {
-			all_same = false;
-			break;
-		}
-	}
-	if (all_same) {
-		LOG_WRN("  Buffer is all 0x%02x but CRC mismatch", expected_byte);
-	} else {
-		/* Find first corrupted byte range */
-		for (uint32_t b = 0; b < s->total_size; b++) {
-			if (s->buffer[b] != expected_byte) {
-				uint16_t frag = b / LARGE_DATA_FRAG_SIZE;
-
-				LOG_WRN("  Corruption at byte %d (frag %d): "
-					"expected 0x%02x got 0x%02x",
-					b, frag, expected_byte, s->buffer[b]);
-				break;
-			}
-		}
-	}
-
 	/* Queue response: NACK if few missing, ACK(CRC_FAIL) if too many */
 	for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
 		if (!pending_responses[i].valid) {
@@ -397,6 +373,26 @@ void large_data_free_completed(uint16_t src_id)
 
 /* ===== Sender: fragment and transmit ===== */
 
+/* Transmit with retry on op_complete error (e.g. LBT/channel busy) */
+static int tx_with_retry(uint32_t tx_handle, void *data, size_t len)
+{
+	for (int retries = 0; retries < 10; retries++) {
+		last_op_err = 0;
+		int err = transmit(tx_handle, data, len);
+
+		if (err) {
+			return err;
+		}
+		k_sem_take(&operation_sem, K_FOREVER);
+		if (last_op_err == 0) {
+			return 0;
+		}
+		k_sleep(K_MSEC(10 + retries * 5));
+	}
+	LOG_ERR("TX failed after retries, err %d", last_op_err);
+	return -EIO;
+}
+
 int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		    uint16_t dst_id, uint8_t file_type,
 		    const void *data, uint32_t data_len)
@@ -407,18 +403,6 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 
 	const uint8_t *src = data;
 
-	/*
-	 * Fragment calculation:
-	 * - TRANSFER packets carry exactly LARGE_DATA_FRAG_SIZE bytes
-	 * - END packet carries 1..LARGE_DATA_FRAG_SIZE bytes (+ CRC header)
-	 * - All fragments except the last use TRANSFER
-	 * - The last fragment uses END (which also carries the CRC)
-	 *
-	 * last_frag_size must be >= 1 (END always carries data).
-	 * Use LARGE_DATA_FRAG_SIZE as the max END payload too — even
-	 * though END has a larger header, the PHY subslot is the same.
-	 * The END payload is simply whatever remains.
-	 */
 	/*
 	 * Fragment calculation: TRANSFER and END have the same payload
 	 * capacity (LARGE_DATA_FRAG_SIZE). All fragments except the last
@@ -448,31 +432,10 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		.crc16 = crc,
 	};
 
-	/* Helper macro: transmit with retry on op_complete error (e.g. LBT fail) */
-#define TX_WITH_RETRY(tx_handle, data, len, label) \
-	do { \
-		int _retries = 0; \
-		while (_retries < 10) { \
-			last_op_err = 0; \
-			err = transmit(tx_handle, data, len); \
-			if (err) { \
-				LOG_ERR("Failed to send " label ", err %d", err); \
-				return err; \
-			} \
-			k_sem_take(&operation_sem, K_FOREVER); \
-			if (last_op_err == 0) { \
-				break; \
-			} \
-			_retries++; \
-			k_sleep(K_MSEC(10 + _retries * 5)); \
-		} \
-		if (last_op_err != 0) { \
-			LOG_ERR(label " failed after retries, err %d", last_op_err); \
-			return -EIO; \
-		} \
-	} while (0)
-
-	TX_WITH_RETRY(tx_handle, &init_pkt, sizeof(init_pkt), "INIT");
+	err = tx_with_retry(tx_handle, &init_pkt, sizeof(init_pkt));
+	if (err) {
+		return err;
+	}
 	k_sleep(K_MSEC(10));
 
 	/* Step 2: Send TRANSFER fragments (all except last) */
@@ -488,9 +451,12 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		memcpy(t->payload, &src[(uint32_t)i * LARGE_DATA_FRAG_SIZE],
 		       LARGE_DATA_FRAG_SIZE);
 
-		TX_WITH_RETRY(tx_handle, buf,
-			      LARGE_DATA_TRANSFER_PACKET_SIZE +
-			      LARGE_DATA_FRAG_SIZE, "frag");
+		err = tx_with_retry(tx_handle, buf,
+				    LARGE_DATA_TRANSFER_PACKET_SIZE +
+				    LARGE_DATA_FRAG_SIZE);
+		if (err) {
+			return err;
+		}
 
 		if ((i + 1) % 100 == 0) {
 			LOG_INF("Sent %d/%d fragments", i + 1, frag_total);
@@ -511,11 +477,12 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		e->frag_num = frag_total - 1;
 		memcpy(e->payload, &src[offset], last_frag_size);
 
-		TX_WITH_RETRY(tx_handle, buf,
-			      LARGE_DATA_END_PACKET_SIZE + last_frag_size, "END");
+		err = tx_with_retry(tx_handle, buf,
+				    LARGE_DATA_END_PACKET_SIZE + last_frag_size);
+		if (err) {
+			return err;
+		}
 	}
-
-#define RETRANSMIT_MAX 3
 
 	LOG_INF("All %d fragments sent, waiting for ACK...", frag_total);
 
@@ -595,9 +562,12 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 					e->frag_num = frag_num;
 					memcpy(e->payload, &src[frag_offset],
 					       last_frag_size);
-					TX_WITH_RETRY(tx_handle, buf,
-						      LARGE_DATA_END_PACKET_SIZE +
-						      last_frag_size, "retx END");
+					err = tx_with_retry(tx_handle, buf,
+						    LARGE_DATA_END_PACKET_SIZE +
+						    last_frag_size);
+					if (err) {
+						return err;
+					}
 				} else {
 					/* Regular fragment — send as TRANSFER */
 					large_data_transfer_packet_t *t =
@@ -608,9 +578,12 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 					t->frag_num = frag_num;
 					memcpy(t->payload, &src[frag_offset],
 					       LARGE_DATA_FRAG_SIZE);
-					TX_WITH_RETRY(tx_handle, buf,
-						      LARGE_DATA_TRANSFER_PACKET_SIZE +
-						      LARGE_DATA_FRAG_SIZE, "retx frag");
+					err = tx_with_retry(tx_handle, buf,
+						    LARGE_DATA_TRANSFER_PACKET_SIZE +
+						    LARGE_DATA_FRAG_SIZE);
+					if (err) {
+						return err;
+					}
 				}
 
 				LOG_INF("Retransmitted fragment %d", frag_num);
@@ -638,9 +611,12 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 				e->dst_device_id = dst_id;
 				e->frag_num = frag_total - 1;
 				memcpy(e->payload, &src[end_offset], last_frag_size);
-				TX_WITH_RETRY(tx_handle, buf,
-					      LARGE_DATA_END_PACKET_SIZE +
-					      last_frag_size, "retx END");
+				err = tx_with_retry(tx_handle, buf,
+					    LARGE_DATA_END_PACKET_SIZE +
+					    last_frag_size);
+				if (err) {
+					return err;
+				}
 			}
 
 			LOG_INF("Retransmission done, waiting for ACK...");
@@ -657,6 +633,4 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		RETRANSMIT_MAX);
 	return -EIO;
 
-#undef TX_WITH_RETRY
-#undef RETRANSMIT_MAX
 }
