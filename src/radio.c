@@ -127,11 +127,11 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 	uint8_t pkt_type = local_buf[0];
 
 	/*
-	 * Process all large data packets directly in ISR context:
-	 * - INIT: k_heap_alloc(K_NO_WAIT), ISR-safe
-	 * - TRANSFER: memcpy into reassembly buffer, ISR-safe
-	 * - END: CRC verify + queue pending ACK, signals main thread
-	 *        via large_data_end_sem to cancel RX and send ACK
+	 * All large data packets (INIT, TRANSFER, END) are queued to
+	 * a ring buffer and processed by a dedicated flash writer thread.
+	 * SPI flash operations are NOT ISR-safe (they use mutexes/sleep).
+	 * INIT must be in the same ring so it's processed before TRANSFER
+	 * fragments that follow it (flash erase must complete first).
 	 */
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_INIT &&
 	    copy_len >= LARGE_DATA_INIT_PACKET_SIZE) {

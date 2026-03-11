@@ -89,12 +89,12 @@ int discovery_count(void)
 }
 
 /* CRC-16/CCITT (polynomial 0x1021) */
-uint16_t compute_crc16(const void *data, uint16_t len)
+uint16_t compute_crc16(const void *data, uint32_t len)
 {
 	const uint8_t *p = data;
 	uint16_t crc = 0xFFFF;
 
-	for (uint16_t i = 0; i < len; i++) {
+	for (uint32_t i = 0; i < len; i++) {
 		crc ^= (uint16_t)p[i] << 8;
 		for (int j = 0; j < 8; j++) {
 			if (crc & 0x8000) {

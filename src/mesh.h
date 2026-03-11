@@ -10,7 +10,7 @@
 #include "packet.h"
 
 /* CRC16 for data integrity */
-uint16_t compute_crc16(const void *data, uint16_t len);
+uint16_t compute_crc16(const void *data, uint32_t len);
 
 /* Compute pairing hash */
 uint32_t compute_pair_hash(uint16_t dev_id, uint32_t random_num);

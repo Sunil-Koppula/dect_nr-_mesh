@@ -165,6 +165,7 @@ static int sensor_do_pairing(void)
 
 static uint16_t parent_id;
 static uint32_t tx_seq;
+static uint8_t large_data_send_count;
 
 static void sensor_send_data(void)
 {
@@ -252,10 +253,12 @@ void sensor_main(void)
 		}
 	}
 
+	large_data_send_count = 0;
+
 	LOG_INF("Sensor ready:");
 	LOG_INF("  Button 2: send small data");
-	LOG_INF("  Button 3: send 50KB (0x5A)");
-	LOG_INF("  Button 4: send 75KB (0x10)");
+	LOG_INF("  Button 3: send 50KB sequential");
+	LOG_INF("  Button 4: send 75KB sequential");
 
 	while (true) {
 		/* Check all button semaphores with short timeout */
@@ -264,35 +267,45 @@ void sensor_main(void)
 			continue;
 		}
 		if (k_sem_take(&btn3_sem, K_MSEC(50)) == 0) {
-			/* 50KB of 0x5A */
-			uint8_t *buf = k_malloc(50 * 1024);
+			/* 50KB sequential: starting byte increments each send */
+			uint32_t size = 50 * 1024;
+			uint8_t *buf = k_malloc(size);
 			if (!buf) {
 				LOG_ERR("Failed to allocate 50KB buffer");
 				continue;
 			}
-			memset(buf, 0x5A, 50 * 1024);
-			LOG_INF("Sending 50KB of 0x5A to parent ID:%d",
-				parent_id);
+			uint8_t start = large_data_send_count;
+			for (uint32_t i = 0; i < size; i++) {
+				buf[i] = (uint8_t)(start + i);
+			}
+			LOG_INF("Sending 50KB sequential (start:0x%02x) to parent ID:%d",
+				start, parent_id);
 			large_data_send(TX_HANDLE, RX_HANDLE,
 					parent_id, LARGE_DATA_FILE_DATA,
-					buf, 50 * 1024);
+					buf, size);
 			k_free(buf);
+			large_data_send_count++;
 			continue;
 		}
 		if (k_sem_take(&btn4_sem, K_MSEC(50)) == 0) {
-			/* 75KB of 0x10 */
-			uint8_t *buf = k_malloc(75 * 1024);
+			/* 75KB sequential: starting byte increments each send */
+			uint32_t size = 75 * 1024;
+			uint8_t *buf = k_malloc(size);
 			if (!buf) {
 				LOG_ERR("Failed to allocate 75KB buffer");
 				continue;
 			}
-			memset(buf, 0x10, 75 * 1024);
-			LOG_INF("Sending 75KB of 0x10 to parent ID:%d",
-				parent_id);
+			uint8_t start = large_data_send_count;
+			for (uint32_t i = 0; i < size; i++) {
+				buf[i] = (uint8_t)(start + i);
+			}
+			LOG_INF("Sending 75KB sequential (start:0x%02x) to parent ID:%d",
+				start, parent_id);
 			large_data_send(TX_HANDLE, RX_HANDLE,
 					parent_id, LARGE_DATA_FILE_DATA,
-					buf, 75 * 1024);
+					buf, size);
 			k_free(buf);
+			large_data_send_count++;
 			continue;
 		}
 	}

@@ -1,0 +1,14 @@
+/*
+ * Enable external SPI flash (GD25WB256) for large data reassembly.
+ * Partition is defined via Partition Manager (pm.yml), not device tree.
+ */
+
+&gd25wb256 {
+	status = "okay";
+};
+
+/ {
+	chosen {
+		nordic,pm-ext-flash = &gd25wb256;
+	};
+};

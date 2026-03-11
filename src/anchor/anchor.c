@@ -22,6 +22,7 @@
 #include "../storage.h"
 #include "../paired_store.h"
 #include "../large_data.h"
+#include "../flash_store.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -373,12 +374,12 @@ static void process_queue(void)
 		case PACKET_TYPE_LARGE_DATA_INIT:
 		case PACKET_TYPE_LARGE_DATA_TRANSFER:
 		case PACKET_TYPE_LARGE_DATA_END:
-			/* Handled directly in ISR (on_pdc) */
+			/* Handled by flash writer thread via ring buffer */
 			break;
 
 		case PACKET_TYPE_LARGE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_NACK:
-			/* Ignore */
+			/* Not applicable here */
 			break;
 
 		default:
@@ -420,6 +421,12 @@ void anchor_main(void)
 	}
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
+
+	int flash_err = flash_store_init();
+	if (flash_err) {
+		LOG_ERR("Flash store init failed, err %d", flash_err);
+		return;
+	}
 	large_data_init();
 
 	/* RX loop — receive from children, respond and relay */
@@ -452,30 +459,70 @@ void anchor_main(void)
 		}
 
 		process_queue();
+		large_data_process_pending_init();
 
 		/* Send any pending large data ACKs */
 		large_data_send_pending_ack(TX_HANDLE);
 
-		/* Relay completed large data to parent */
-		uint8_t *ld_data;
+		/* Relay completed large data to parent (read from flash) */
+		uint8_t ld_slot;
 		uint32_t ld_size;
 		uint8_t ld_file_type;
 		uint16_t ld_src_id;
 
-		while (large_data_get_completed(&ld_data, &ld_size,
+		while (large_data_get_completed(&ld_slot, &ld_size,
 						&ld_file_type, &ld_src_id)) {
-			LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d",
-				ld_size, ld_src_id, parent_id);
-			int relay_err = large_data_send(
-				TX_HANDLE, RX_HANDLE,
-				parent_id, ld_file_type,
-				ld_data, ld_size);
-			if (relay_err) {
-				LOG_ERR("Failed to relay large data, err %d",
-					relay_err);
-			} else {
-				LOG_INF("Large data relay to parent complete");
+			LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d (flash slot:%d)",
+				ld_size, ld_src_id, parent_id, ld_slot);
+
+			/* Read data from flash into a temporary buffer and relay.
+			 * Use FLASH_STORE_READ_CHUNK-sized reads to keep
+			 * stack usage bounded. Allocate full relay buffer
+			 * from heap since large_data_send needs contiguous data. */
+			uint8_t *relay_buf = k_malloc(ld_size);
+
+			if (!relay_buf) {
+				LOG_ERR("Failed to allocate %d bytes for relay",
+					ld_size);
+				large_data_free_completed(ld_src_id);
+				continue;
 			}
+
+			uint32_t remaining = ld_size;
+			uint32_t offset = 0;
+			bool read_ok = true;
+
+			while (remaining > 0) {
+				uint16_t chunk = (remaining > FLASH_STORE_READ_CHUNK) ?
+						 FLASH_STORE_READ_CHUNK :
+						 (uint16_t)remaining;
+				int rerr = flash_store_read(ld_slot, offset,
+							    &relay_buf[offset],
+							    chunk);
+				if (rerr) {
+					LOG_ERR("Flash read failed at offset %d, err %d",
+						offset, rerr);
+					read_ok = false;
+					break;
+				}
+				offset += chunk;
+				remaining -= chunk;
+			}
+
+			if (read_ok) {
+				int relay_err = large_data_send(
+					TX_HANDLE, RX_HANDLE,
+					parent_id, ld_file_type,
+					relay_buf, ld_size);
+				if (relay_err) {
+					LOG_ERR("Failed to relay large data, err %d",
+						relay_err);
+				} else {
+					LOG_INF("Large data relay to parent complete");
+				}
+			}
+
+			k_free(relay_buf);
 			large_data_free_completed(ld_src_id);
 		}
 

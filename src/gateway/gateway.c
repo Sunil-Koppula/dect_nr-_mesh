@@ -21,6 +21,7 @@
 #include "../state.h"
 #include "../paired_store.h"
 #include "../large_data.h"
+#include "../flash_store.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -189,13 +190,16 @@ static void process_queue(void)
 			}
 			break;
 
-		case PACKET_TYPE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_INIT:
 		case PACKET_TYPE_LARGE_DATA_TRANSFER:
 		case PACKET_TYPE_LARGE_DATA_END:
+			/* Handled by flash writer thread via ring buffer */
+			break;
+
+		case PACKET_TYPE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_NACK:
-			/* Handled elsewhere or not applicable */
+			/* Not applicable for gateway */
 			break;
 
 		default:
@@ -212,6 +216,12 @@ void gateway_main(void)
 	LOG_INF("Gateway mode started (ID:%d, hop:0)", device_id);
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
+
+	int flash_err = flash_store_init();
+	if (flash_err) {
+		LOG_ERR("Flash store init failed, err %d", flash_err);
+		return;
+	}
 	large_data_init();
 
 	while (true) {
@@ -241,18 +251,19 @@ void gateway_main(void)
 		}
 
 		process_queue();
+		large_data_process_pending_init();
 		large_data_send_pending_ack(TX_HANDLE);
 
 		/* Free completed sessions (gateway is the final destination) */
-		uint8_t *ld_data;
+		uint8_t ld_slot;
 		uint32_t ld_size;
 		uint8_t ld_file_type;
 		uint16_t ld_src_id;
 
-		while (large_data_get_completed(&ld_data, &ld_size,
+		while (large_data_get_completed(&ld_slot, &ld_size,
 						&ld_file_type, &ld_src_id)) {
-			LOG_INF("Large data received: %d bytes from ID:%d type:%d",
-				ld_size, ld_src_id, ld_file_type);
+			LOG_INF("Large data received: %d bytes from ID:%d type:%d (flash slot:%d)",
+				ld_size, ld_src_id, ld_file_type, ld_slot);
 			large_data_free_completed(ld_src_id);
 		}
 
