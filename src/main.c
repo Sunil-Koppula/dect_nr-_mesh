@@ -30,8 +30,10 @@ uint8_t my_hop_num;
 /* Factory reset: hold button 1 for 2 seconds */
 #define FACTORY_RESET_HOLD_MS 2000
 
-/* Button 2: trigger sensor data send */
+/* Button semaphores for sensor triggers */
 K_SEM_DEFINE(btn2_sem, 0, 1);
+K_SEM_DEFINE(btn3_sem, 0, 1);
+K_SEM_DEFINE(btn4_sem, 0, 1);
 
 static int64_t btn1_press_time;
 
@@ -57,9 +59,19 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 		}
 	}
 
-	/* Button 2 press triggers data send */
+	/* Button 2 press triggers small data send */
 	if ((has_changed & DK_BTN2_MSK) && (button_state & DK_BTN2_MSK)) {
 		k_sem_give(&btn2_sem);
+	}
+
+	/* Button 3 press triggers 25KB large data send */
+	if ((has_changed & DK_BTN3_MSK) && (button_state & DK_BTN3_MSK)) {
+		k_sem_give(&btn3_sem);
+	}
+
+	/* Button 4 press triggers 10KB large data send */
+	if ((has_changed & DK_BTN4_MSK) && (button_state & DK_BTN4_MSK)) {
+		k_sem_give(&btn4_sem);
 	}
 }
 

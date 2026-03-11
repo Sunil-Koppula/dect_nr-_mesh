@@ -7,6 +7,7 @@
  *   3. Verify hash, send PAIR_CONFIRM(SUCCESS) and store identity in NVM
  */
 
+#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
@@ -18,6 +19,7 @@
 #include "../mesh.h"
 #include "../state.h"
 #include "../storage.h"
+#include "../large_data.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -250,11 +252,48 @@ void sensor_main(void)
 		}
 	}
 
-	LOG_INF("Sensor ready, press button 2 to send data");
+	LOG_INF("Sensor ready:");
+	LOG_INF("  Button 2: send small data");
+	LOG_INF("  Button 3: send 20KB (0x5A)");
+	LOG_INF("  Button 4: send 10KB (0x10)");
 
-	/* Wait for button 2 press to send data */
 	while (true) {
-		k_sem_take(&btn2_sem, K_FOREVER);
-		sensor_send_data();
+		/* Check all button semaphores with short timeout */
+		if (k_sem_take(&btn2_sem, K_MSEC(50)) == 0) {
+			sensor_send_data();
+			continue;
+		}
+		if (k_sem_take(&btn3_sem, K_MSEC(50)) == 0) {
+			/* 20KB of 0x5A */
+			uint8_t *buf = k_malloc(20 * 1024);
+			if (!buf) {
+				LOG_ERR("Failed to allocate 20KB buffer");
+				continue;
+			}
+			memset(buf, 0x5A, 20 * 1024);
+			LOG_INF("Sending 20KB of 0x5A to parent ID:%d",
+				parent_id);
+			large_data_send(SENSOR_TX_HANDLE, SENSOR_RX_HANDLE,
+					parent_id, LARGE_DATA_FILE_DATA,
+					buf, 20 * 1024);
+			k_free(buf);
+			continue;
+		}
+		if (k_sem_take(&btn4_sem, K_MSEC(50)) == 0) {
+			/* 10KB of 0x10 */
+			uint8_t *buf = k_malloc(10 * 1024);
+			if (!buf) {
+				LOG_ERR("Failed to allocate 10KB buffer");
+				continue;
+			}
+			memset(buf, 0x10, 10 * 1024);
+			LOG_INF("Sending 10KB of 0x10 to parent ID:%d",
+				parent_id);
+			large_data_send(SENSOR_TX_HANDLE, SENSOR_RX_HANDLE,
+					parent_id, LARGE_DATA_FILE_DATA,
+					buf, 10 * 1024);
+			k_free(buf);
+			continue;
+		}
 	}
 }

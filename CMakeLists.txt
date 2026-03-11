@@ -15,6 +15,7 @@ target_sources(app PRIVATE
   src/mesh.c
   src/queue.c
   src/storage.c
+  src/large_data.c
   src/gateway/gateway.c
   src/anchor/anchor.c
   src/sensor/sensor.c

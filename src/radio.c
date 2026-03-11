@@ -8,6 +8,7 @@
 #include "radio.h"
 #include "queue.h"
 #include "state.h"
+#include "large_data.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -109,6 +110,39 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 	if (evt->len < 1) {
 		return;
 	}
+
+	/*
+	 * Process all large data packets directly in ISR context:
+	 * - INIT: k_heap_alloc(K_NO_WAIT), ISR-safe
+	 * - TRANSFER: memcpy into reassembly buffer, ISR-safe
+	 * - END: CRC verify + queue pending ACK, signals main thread
+	 *        via large_data_end_sem to cancel RX and send ACK
+	 */
+	uint8_t pkt_type = ((const uint8_t *)evt->data)[0];
+
+	if (pkt_type == PACKET_TYPE_LARGE_DATA_INIT &&
+	    evt->len >= LARGE_DATA_INIT_PACKET_SIZE) {
+		large_data_handle_init(
+			(const large_data_init_packet_t *)evt->data);
+		return;
+	}
+
+	if (pkt_type == PACKET_TYPE_LARGE_DATA_TRANSFER &&
+	    evt->len >= LARGE_DATA_TRANSFER_PACKET_SIZE) {
+		large_data_handle_transfer(
+			(const large_data_transfer_packet_t *)evt->data,
+			evt->len);
+		return;
+	}
+
+	if (pkt_type == PACKET_TYPE_LARGE_DATA_END &&
+	    evt->len >= LARGE_DATA_END_PACKET_SIZE) {
+		large_data_handle_end(
+			(const large_data_end_packet_t *)evt->data,
+			evt->len);
+		return;
+	}
+
 	rx_queue_put(evt->data, evt->len, evt->rssi_2);
 }
 

@@ -17,12 +17,16 @@ typedef enum {
 
 /* Packet Types Identifier */
 typedef enum {
-	PACKET_TYPE_UNKNOWN       = 0x00,
-	PACKET_TYPE_PAIR_REQUEST  = 0x01,
-	PACKET_TYPE_PAIR_RESPONSE = 0x02,
-	PACKET_TYPE_PAIR_CONFIRM  = 0x03,
-	PACKET_TYPE_DATA          = 0x04,
-	PACKET_TYPE_DATA_ACK      = 0x05,
+	PACKET_TYPE_UNKNOWN       		= 0x00,
+	PACKET_TYPE_PAIR_REQUEST  		= 0x01,
+	PACKET_TYPE_PAIR_RESPONSE 		= 0x02,
+	PACKET_TYPE_PAIR_CONFIRM  		= 0x03,
+	PACKET_TYPE_DATA          		= 0x04,
+	PACKET_TYPE_DATA_ACK      		= 0x05,
+	PACKET_TYPE_LARGE_DATA_INIT     = 0x06,
+	PACKET_TYPE_LARGE_DATA_TRANSFER = 0x07,
+	PACKET_TYPE_LARGE_DATA_END	  	= 0x08,
+	PACKET_TYPE_LARGE_DATA_ACK      = 0x09,
 } packet_type_t;
 
 /* Pairing confirm status codes */
@@ -32,6 +36,14 @@ typedef enum {
 /* Data ACK status codes */
 #define DATA_ACK_SUCCESS  0x00
 #define DATA_ACK_CRC_FAIL 0x01
+
+/* Large data file types */
+#define LARGE_DATA_FILE_DATA 0x00
+#define LARGE_DATA_FILE_OTA  0x01
+
+/* Large data ACK status codes */
+#define LARGE_DATA_ACK_SUCCESS  0x00
+#define LARGE_DATA_ACK_CRC_FAIL 0x01
 
 /* Max application data length per PHY subslot */
 #define DATA_LEN_MAX 32
@@ -97,6 +109,56 @@ typedef struct {
 } __attribute__((packed)) data_ack_packet_t;
 
 #define DATA_ACK_PACKET_SIZE sizeof(data_ack_packet_t)
+
+/********** Large Data Transfer Packets **********/
+
+/* Large Data Init — announces a new transfer */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_INIT */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t file_type;          /* LARGE_DATA_FILE_DATA / OTA */
+	uint32_t total_size;        /* total data size in bytes */
+	uint16_t frag_total;        /* total number of fragments */
+	uint8_t last_frag_size;     /* payload size of last fragment */
+	uint16_t crc16;             /* CRC16 over ALL data bytes */
+} __attribute__((packed)) large_data_init_packet_t;
+
+#define LARGE_DATA_INIT_PACKET_SIZE sizeof(large_data_init_packet_t)
+
+/* Large Data Transfer — one fragment of data */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_TRANSFER */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint16_t frag_num;          /* fragment index (0-based) */
+	uint8_t payload[0];         /* up to LARGE_DATA_FRAG_SIZE bytes */
+} __attribute__((packed)) large_data_transfer_packet_t;
+
+#define LARGE_DATA_TRANSFER_PACKET_SIZE sizeof(large_data_transfer_packet_t)
+#define LARGE_DATA_FRAG_SIZE (DATA_LEN_MAX - LARGE_DATA_TRANSFER_PACKET_SIZE)
+
+/* Large Data End — last fragment (same layout as TRANSFER) */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_END */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint16_t frag_num;          /* last fragment index */
+	uint8_t payload[0];         /* last fragment data */
+} __attribute__((packed)) large_data_end_packet_t;
+
+#define LARGE_DATA_END_PACKET_SIZE sizeof(large_data_end_packet_t)
+#define LARGE_DATA_END_FRAG_SIZE (DATA_LEN_MAX - LARGE_DATA_END_PACKET_SIZE)
+
+/* Large Data ACK — receiver confirms whole transfer */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_ACK */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t status;             /* LARGE_DATA_ACK_SUCCESS / CRC_FAIL */
+} __attribute__((packed)) large_data_ack_packet_t;
+
+#define LARGE_DATA_ACK_PACKET_SIZE sizeof(large_data_ack_packet_t)
 
 /* Get device type as string */
 static inline const char *device_type_str(device_type_t type)

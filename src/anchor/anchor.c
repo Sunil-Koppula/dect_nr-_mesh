@@ -20,6 +20,7 @@
 #include "../mesh.h"
 #include "../state.h"
 #include "../storage.h"
+#include "../large_data.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -458,6 +459,16 @@ static void anchor_process_queue(void)
 			}
 			break;
 
+		case PACKET_TYPE_LARGE_DATA_INIT:
+		case PACKET_TYPE_LARGE_DATA_TRANSFER:
+		case PACKET_TYPE_LARGE_DATA_END:
+			/* Handled directly in ISR (on_pdc) */
+			break;
+
+		case PACKET_TYPE_LARGE_DATA_ACK:
+			/* Ignore */
+			break;
+
 		default:
 			LOG_WRN("Unknown packet type 0x%02x", pkt_type);
 			break;
@@ -490,6 +501,7 @@ void anchor_main(void)
 	}
 
 	anchor_print_paired();
+	large_data_init();
 
 	/* RX loop — receive from children, respond and relay */
 	while (true) {
@@ -500,9 +512,36 @@ void anchor_main(void)
 			continue;
 		}
 
-		k_sem_take(&operation_sem, K_FOREVER);
+		/* Wait for either RX window to end or large data END to arrive */
+		bool cancelled = false;
+
+		while (true) {
+			if (k_sem_take(&operation_sem, K_MSEC(10)) == 0) {
+				break; /* RX window ended naturally */
+			}
+			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+				/* END arrived — cancel RX to send ACK now */
+				nrf_modem_dect_phy_cancel(ANCHOR_RX_HANDLE);
+				/* Cancel generates on_op_complete + on_cancel.
+				 * Wait for both callbacks to fire. */
+				k_sem_take(&operation_sem, K_FOREVER);
+				k_sleep(K_MSEC(50));
+				k_sem_reset(&operation_sem);
+				cancelled = true;
+				break;
+			}
+		}
 
 		anchor_process_queue();
+
+		/* Send any pending large data ACK */
+		large_data_send_pending_ack(ANCHOR_TX_HANDLE);
+
+		/* After cancel, drain any stale sem gives before next RX */
+		if (cancelled) {
+			k_sleep(K_MSEC(10));
+			k_sem_reset(&operation_sem);
+		}
 
 		k_sleep(K_MSEC(10));
 	}
