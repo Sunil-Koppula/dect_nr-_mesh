@@ -54,8 +54,12 @@ typedef struct {
 	uint8_t last_frag_size;
 	uint16_t crc16;             /* expected CRC (from INIT) */
 	uint16_t frags_received;    /* count of fragments received */
+	int64_t last_activity_ms;   /* uptime at last fragment received */
 	uint8_t frag_bitmap[LARGE_DATA_BITMAP_MAX]; /* received-fragment bitmap */
 } large_data_rx_session_t;
+
+/* Session timeout — free stale sessions after this period of inactivity */
+#define LARGE_DATA_SESSION_TIMEOUT_MS (30 * 1000)
 
 /* Initialize large data module (call after flash_store_init) */
 void large_data_init(void);
@@ -81,6 +85,13 @@ void large_data_send_pending_ack(uint32_t tx_handle);
 
 /* Process deferred INIT packets that need flash erase (main thread) */
 void large_data_process_pending_init(void);
+
+/* Clean up sessions that have been inactive for LARGE_DATA_SESSION_TIMEOUT_MS.
+ * Call periodically from the main loop. */
+void large_data_cleanup_stale_sessions(void);
+
+/* Returns true if any session is actively receiving fragments */
+bool large_data_any_active_session(void);
 
 /* Semaphore signaled when END is processed and ACK needs to be sent.
  * Main loop should check this to break out of RX early. */

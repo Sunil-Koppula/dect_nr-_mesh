@@ -29,7 +29,7 @@ LOG_MODULE_DECLARE(app);
 BUILD_ASSERT(LARGE_DATA_MAX_SESSIONS == FLASH_STORE_MAX_SLOTS,
 	     "Session count must match flash slot count");
 
-#define RETRANSMIT_MAX 3
+#define RETRANSMIT_MAX 5
 
 /* ===== Fragment ring buffer for ISR -> thread offloading ===== */
 
@@ -115,6 +115,33 @@ static void free_session(large_data_rx_session_t *s)
 	s->state = LARGE_DATA_STATE_IDLE;
 }
 
+void large_data_cleanup_stale_sessions(void)
+{
+	int64_t now = k_uptime_get();
+
+	for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
+		large_data_rx_session_t *s = &sessions[i];
+
+		if (s->state == LARGE_DATA_STATE_RECEIVING &&
+		    (now - s->last_activity_ms) > LARGE_DATA_SESSION_TIMEOUT_MS) {
+			LOG_WRN("Session for ID:%d timed out (%d/%d frags), freeing slot %d",
+				s->src_device_id, s->frags_received,
+				s->frag_total, s->flash_slot);
+			s->state = LARGE_DATA_STATE_IDLE;
+		}
+	}
+}
+
+bool large_data_any_active_session(void)
+{
+	for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
+		if (sessions[i].state == LARGE_DATA_STATE_RECEIVING) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* ===== Flash writer: processes fragment ring in thread context ===== */
 
 static void process_transfer(const large_data_transfer_packet_t *pkt,
@@ -160,6 +187,7 @@ static void process_transfer(const large_data_transfer_packet_t *pkt,
 
 	s->frag_bitmap[pkt->frag_num / 8] |= (1 << (pkt->frag_num % 8));
 	s->frags_received++;
+	s->last_activity_ms = k_uptime_get();
 
 	if (s->frags_received % 100 == 0) {
 		LOG_INF("Received %d/%d fragments from ID:%d",
@@ -293,30 +321,39 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		}
 	}
 
-	/* Queue response: NACK if few missing, ACK(CRC_FAIL) if too many */
+	/* Queue response: NACK if any missing (send up to MAX per NACK),
+	 * ACK(CRC_FAIL) only if 0 missing but CRC still wrong */
 	for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
 		if (!pending_responses[i].valid) {
-			if (missing_count > 0 &&
-			    missing_count <= LARGE_DATA_NACK_MAX_FRAGS) {
+			if (missing_count > 0) {
+				/* Send NACK with up to NACK_MAX_FRAGS missing frag numbers.
+				 * If more are missing, sender will retransmit these,
+				 * then re-send END, and we'll NACK again for the rest. */
+				uint8_t send_count = (missing_count > LARGE_DATA_NACK_MAX_FRAGS)
+					? LARGE_DATA_NACK_MAX_FRAGS
+					: (uint8_t)missing_count;
 				large_data_nack_packet_t *nack =
 					(large_data_nack_packet_t *)pending_responses[i].data;
 				nack->packet_type = PACKET_TYPE_LARGE_DATA_NACK;
 				nack->src_device_id = device_id;
 				nack->dst_device_id = pkt->src_device_id;
-				nack->frag_count = (uint8_t)missing_count;
+				nack->frag_count = send_count;
 				uint8_t idx = 0;
 
-				for (uint16_t f = 0; f < s->frag_total; f++) {
+				for (uint16_t f = 0;
+				     f < s->frag_total && idx < send_count; f++) {
 					if (!(s->frag_bitmap[f / 8] & (1 << (f % 8)))) {
 						nack->frag_nums[idx++] = f;
 					}
 				}
 				pending_responses[i].len = LARGE_DATA_NACK_PACKET_SIZE +
-					missing_count * sizeof(uint16_t);
+					send_count * sizeof(uint16_t);
 				pending_responses[i].session = s;
 				pending_responses[i].free_session = false;
 				s->state = LARGE_DATA_STATE_RECEIVING;
 				s->frags_received--;
+				LOG_INF("NACK with %d/%d missing frags",
+					send_count, missing_count);
 			} else {
 				large_data_ack_packet_t *ack =
 					(large_data_ack_packet_t *)pending_responses[i].data;
@@ -382,6 +419,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 	s->last_frag_size = pkt->last_frag_size;
 	s->crc16 = pkt->crc16;
 	s->frags_received = 0;
+	s->last_activity_ms = k_uptime_get();
 	memset(s->frag_bitmap, 0, sizeof(s->frag_bitmap));
 
 	LOG_INF("Reassembly started for ID:%d (slot:%d, %d bytes, %d frags)",
@@ -715,7 +753,7 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 
 	/* Step 4: Wait for ACK/NACK, retransmit on NACK */
 	for (int retransmit = 0; retransmit <= RETRANSMIT_MAX; retransmit++) {
-		err = receive_ms(rx_handle, 5000);
+		err = receive_ms(rx_handle, 10000);
 		if (err) {
 			LOG_ERR("Receive for ACK failed, err %d", err);
 			return err;

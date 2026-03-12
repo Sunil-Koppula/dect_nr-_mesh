@@ -135,24 +135,34 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 	 */
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_INIT &&
 	    copy_len >= LARGE_DATA_INIT_PACKET_SIZE) {
-		large_data_handle_init(
-			(const large_data_init_packet_t *)local_buf);
+		const large_data_init_packet_t *init =
+			(const large_data_init_packet_t *)local_buf;
+		if (init->dst_device_id != device_id) {
+			return;
+		}
+		large_data_handle_init(init);
 		return;
 	}
 
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_TRANSFER &&
 	    copy_len >= LARGE_DATA_TRANSFER_PACKET_SIZE) {
-		large_data_handle_transfer(
-			(const large_data_transfer_packet_t *)local_buf,
-			copy_len);
+		const large_data_transfer_packet_t *xfer =
+			(const large_data_transfer_packet_t *)local_buf;
+		if (xfer->dst_device_id != device_id) {
+			return;
+		}
+		large_data_handle_transfer(xfer, copy_len);
 		return;
 	}
 
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_END &&
 	    copy_len >= LARGE_DATA_END_PACKET_SIZE) {
-		large_data_handle_end(
-			(const large_data_end_packet_t *)local_buf,
-			copy_len);
+		const large_data_end_packet_t *end =
+			(const large_data_end_packet_t *)local_buf;
+		if (end->dst_device_id != device_id) {
+			return;
+		}
+		large_data_handle_end(end, copy_len);
 		return;
 	}
 

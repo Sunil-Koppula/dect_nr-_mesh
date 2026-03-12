@@ -267,6 +267,8 @@ void gateway_main(void)
 			large_data_free_completed(ld_src_id);
 		}
 
+		large_data_cleanup_stale_sessions();
+
 		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
 		}
 

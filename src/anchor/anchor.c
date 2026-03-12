@@ -464,67 +464,74 @@ void anchor_main(void)
 		/* Send any pending large data ACKs */
 		large_data_send_pending_ack(TX_HANDLE);
 
-		/* Relay completed large data to parent (read from flash) */
-		uint8_t ld_slot;
-		uint32_t ld_size;
-		uint8_t ld_file_type;
-		uint16_t ld_src_id;
+		/* Relay completed large data to parent — but only when no
+		 * sessions are actively receiving. Receiving takes priority
+		 * over relaying, since relay blocks the radio for ~18s. */
+		if (!large_data_any_active_session()) {
+			uint8_t ld_slot;
+			uint32_t ld_size;
+			uint8_t ld_file_type;
+			uint16_t ld_src_id;
 
-		while (large_data_get_completed(&ld_slot, &ld_size,
-						&ld_file_type, &ld_src_id)) {
-			LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d (flash slot:%d)",
-				ld_size, ld_src_id, parent_id, ld_slot);
+			if (large_data_get_completed(&ld_slot, &ld_size,
+						     &ld_file_type,
+						     &ld_src_id)) {
+				LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d (flash slot:%d)",
+					ld_size, ld_src_id, parent_id,
+					ld_slot);
 
-			/* Read data from flash into a temporary buffer and relay.
-			 * Use FLASH_STORE_READ_CHUNK-sized reads to keep
-			 * stack usage bounded. Allocate full relay buffer
-			 * from heap since large_data_send needs contiguous data. */
-			uint8_t *relay_buf = k_malloc(ld_size);
+				uint8_t *relay_buf = k_malloc(ld_size);
 
-			if (!relay_buf) {
-				LOG_ERR("Failed to allocate %d bytes for relay",
-					ld_size);
-				large_data_free_completed(ld_src_id);
-				continue;
-			}
-
-			uint32_t remaining = ld_size;
-			uint32_t offset = 0;
-			bool read_ok = true;
-
-			while (remaining > 0) {
-				uint16_t chunk = (remaining > FLASH_STORE_READ_CHUNK) ?
-						 FLASH_STORE_READ_CHUNK :
-						 (uint16_t)remaining;
-				int rerr = flash_store_read(ld_slot, offset,
-							    &relay_buf[offset],
-							    chunk);
-				if (rerr) {
-					LOG_ERR("Flash read failed at offset %d, err %d",
-						offset, rerr);
-					read_ok = false;
-					break;
-				}
-				offset += chunk;
-				remaining -= chunk;
-			}
-
-			if (read_ok) {
-				int relay_err = large_data_send(
-					TX_HANDLE, RX_HANDLE,
-					parent_id, ld_file_type,
-					relay_buf, ld_size);
-				if (relay_err) {
-					LOG_ERR("Failed to relay large data, err %d",
-						relay_err);
+				if (!relay_buf) {
+					LOG_ERR("Failed to allocate %d bytes for relay",
+						ld_size);
+					large_data_free_completed(ld_src_id);
 				} else {
-					LOG_INF("Large data relay to parent complete");
+					uint32_t remaining = ld_size;
+					uint32_t offset = 0;
+					bool read_ok = true;
+
+					while (remaining > 0) {
+						uint16_t chunk =
+							(remaining > FLASH_STORE_READ_CHUNK)
+							? FLASH_STORE_READ_CHUNK
+							: (uint16_t)remaining;
+						int rerr = flash_store_read(
+							ld_slot, offset,
+							&relay_buf[offset],
+							chunk);
+						if (rerr) {
+							LOG_ERR("Flash read failed at offset %d, err %d",
+								offset, rerr);
+							read_ok = false;
+							break;
+						}
+						offset += chunk;
+						remaining -= chunk;
+					}
+
+					if (read_ok) {
+						int relay_err = large_data_send(
+							TX_HANDLE, RX_HANDLE,
+							parent_id,
+							ld_file_type,
+							relay_buf, ld_size);
+						if (relay_err) {
+							LOG_ERR("Failed to relay large data, err %d",
+								relay_err);
+						} else {
+							LOG_INF("Large data relay to parent complete");
+						}
+					}
+
+					k_free(relay_buf);
+					large_data_free_completed(ld_src_id);
 				}
 			}
-
-			k_free(relay_buf);
-			large_data_free_completed(ld_src_id);
 		}
+
+		/* Clean up sessions that timed out (e.g. sender gave up) */
+		large_data_cleanup_stale_sessions();
 
 		/* Drain any extra large_data_end_sem gives */
 		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
