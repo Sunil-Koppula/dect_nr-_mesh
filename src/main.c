@@ -17,6 +17,8 @@
 #include "gateway/gateway.h"
 #include "anchor/anchor.h"
 #include "sensor/sensor.h"
+#include "display.h"
+#include <stdio.h>
 
 LOG_MODULE_REGISTER(app);
 
@@ -144,6 +146,14 @@ int main(void)
 
 	hwinfo_get_device_id((void *)&device_id, sizeof(device_id));
 	LOG_INF("PHY ready, device ID: %d", device_id);
+
+	/* Initialize and show device type + ID on DFR0997 display */
+	err = display_init();
+	if (err) {
+		LOG_WRN("display init failed, err %d (continuing)", err);
+	} else {
+		display_header(my_device_type, device_id);
+	}
 
 	/* Dispatch to device-type entry point */
 	switch (my_device_type) {

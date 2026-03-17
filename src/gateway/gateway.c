@@ -22,6 +22,7 @@
 #include "../paired_store.h"
 #include "../large_data.h"
 #include "../flash_store.h"
+#include "../display.h"
 
 LOG_MODULE_DECLARE(app);
 

@@ -6,6 +6,7 @@
 #include <zephyr/logging/log.h>
 #include "paired_store.h"
 #include "storage.h"
+#include "display.h"
 
 LOG_MODULE_DECLARE(app);
 

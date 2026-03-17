@@ -1,0 +1,41 @@
+/*
+ * DFR0997 UART LCD Display Driver
+ * 320x240 IPS TFT with ESP32-S3 controller
+ * Serial mode: 9600 baud, 8N1
+ * Protocol: 0x55 0xAA <len> <cmd> <payload...>
+ */
+
+#ifndef DISPLAY_H
+#define DISPLAY_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "packet.h"
+
+/* Initialize UART1 for the DFR0997 display */
+int display_init(void);
+
+/* Clear all objects from the display */
+void display_clear(void);
+
+/* Set background color (RGB) */
+void display_set_bg(uint8_t r, uint8_t g, uint8_t b);
+
+/* Draw a text string at pixel position (x, y) with font size and color */
+void display_draw_string(uint16_t x, uint16_t y, const char *text, uint8_t font_size, uint8_t r, uint8_t g, uint8_t b);
+
+/* Draw device type and ID header (called on startup after PHY init) */
+void display_header(device_type_t type, uint16_t device_id);
+
+/* Log a message on the display */
+void DISPLAY_LOG_INF(const char *fmt, ...);
+void DISPLAY_LOG_WRN(const char *fmt, ...);
+void DISPLAY_LOG_ERR(const char *fmt, ...);
+
+/* Log to both Zephyr LOG and display */
+#define ALL_ERR(fmt, ...) do { LOG_ERR(fmt, ##__VA_ARGS__); DISPLAY_LOG_ERR(fmt, ##__VA_ARGS__); } while (0)
+#define ALL_WRN(fmt, ...) do { LOG_WRN(fmt, ##__VA_ARGS__); DISPLAY_LOG_WRN(fmt, ##__VA_ARGS__); } while (0)
+#define ALL_INF(fmt, ...) do { LOG_INF(fmt, ##__VA_ARGS__); DISPLAY_LOG_INF(fmt, ##__VA_ARGS__); } while (0)
+#define ALL_DBG(fmt, ...) do { LOG_DBG(fmt, ##__VA_ARGS__); DISPLAY_LOG_INF(fmt, ##__VA_ARGS__); } while (0)
+
+#endif /* DISPLAY_H */

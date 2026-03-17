@@ -14,6 +14,7 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include "anchor.h"
+#include "../display.h"
 #include "../packet.h"
 #include "../radio.h"
 #include "../queue.h"
