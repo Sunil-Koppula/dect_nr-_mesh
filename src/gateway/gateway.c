@@ -22,7 +22,7 @@
 #include "../paired_store.h"
 #include "../large_data.h"
 #include "../flash_store.h"
-#include "../display.h"
+#include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -59,7 +59,7 @@ static int transmit_and_wait(void *data, size_t len)
 
 static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2)
 {
-	LOG_INF("Pair request from %s ID:%d (RSSI:%d)",
+	ALL_INF("Pair request from %s ID:%d (RSSI:%d)",
 		device_type_str(pkt->device_type), pkt->device_id, rssi_2 / 2);
 
 	uint32_t hash = compute_pair_hash(pkt->device_id, pkt->random_num);
@@ -72,7 +72,7 @@ static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
 
-	LOG_INF("Pair response sent to ID:%d", pkt->device_id);
+	ALL_INF("Pair response sent to ID:%d", pkt->device_id);
 }
 
 static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
@@ -81,7 +81,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 		return;
 	}
 
-	LOG_INF("Pair confirm from %s ID:%d status:%s",
+	ALL_INF("Pair confirm from %s ID:%d status:%s",
 		device_type_str(pkt->device_type), pkt->device_id,
 		(pkt->status == PAIR_STATUS_SUCCESS) ? "SUCCESS" : "FAILURE");
 
@@ -96,7 +96,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 	} else if (pkt->device_type == DEVICE_TYPE_ANCHOR) {
 		store = &anchor_store;
 	} else {
-		LOG_WRN("Unexpected device type %d in pair confirm",
+		ALL_WRN("Unexpected device type %d in pair confirm",
 			pkt->device_type);
 		return;
 	}
@@ -107,7 +107,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 		LOG_ERR("Failed to store %s ID:%d, err %d",
 			store->label, pkt->device_id, err);
 	} else {
-		LOG_INF("%s ID:%d paired and stored in NVM",
+		ALL_INF("%s ID:%d paired and stored in NVM",
 			store->label, pkt->device_id);
 	}
 }
@@ -128,10 +128,10 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	uint8_t status = (rx_crc == calc_crc) ? DATA_ACK_SUCCESS : DATA_ACK_CRC_FAIL;
 
 	if (status == DATA_ACK_SUCCESS) {
-		LOG_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
+		ALL_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
 			pkt->src_device_id, payload_len, rssi_2 / 2);
 	} else {
-		LOG_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
+		ALL_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
 			pkt->src_device_id, payload_len, rssi_2 / 2);
 	}
 
@@ -146,11 +146,11 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	int err = transmit_and_wait(&ack, sizeof(ack));
 
 	if (err) {
-		LOG_ERR("Failed to send data ACK, err %d", err);
+		ALL_ERR("Failed to send data ACK, err %d", err);
 		return;
 	}
 
-	LOG_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
+	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
 		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
 }
 
@@ -204,7 +204,7 @@ static void process_queue(void)
 			break;
 
 		default:
-			LOG_WRN("Unknown packet type 0x%02x", pkt_type);
+			ALL_WRN("Unknown packet type 0x%02x", pkt_type);
 			break;
 		}
 	}
@@ -214,13 +214,13 @@ static void process_queue(void)
 
 void gateway_main(void)
 {
-	LOG_INF("Gateway mode started (ID:%d, hop:0)", device_id);
+	ALL_INF("Gateway mode started (ID:%d, hop:0)", device_id);
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
 	int flash_err = flash_store_init();
 	if (flash_err) {
-		LOG_ERR("Flash store init failed, err %d", flash_err);
+		ALL_ERR("Flash store init failed, err %d", flash_err);
 		return;
 	}
 	large_data_init();
@@ -229,7 +229,7 @@ void gateway_main(void)
 		int err = receive(RX_HANDLE);
 
 		if (err) {
-			LOG_ERR("Receive failed, err %d", err);
+			ALL_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
@@ -274,7 +274,7 @@ void gateway_main(void)
 
 		while (large_data_get_completed(&ld_slot, &ld_size,
 						&ld_file_type, &ld_src_id)) {
-			LOG_INF("Large data received: %d bytes from ID:%d type:%d (flash slot:%d)",
+			ALL_INF("Large data received: %d bytes from ID:%d type:%d (flash slot:%d)",
 				ld_size, ld_src_id, ld_file_type, ld_slot);
 			large_data_free_completed(ld_src_id);
 		}

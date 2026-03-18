@@ -25,6 +25,39 @@ LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 #define HDR_H 0x55
 #define HDR_L 0xAA
 
+/* ---------- LCD log queue & worker thread ---------- */
+#define DISPLAY_LOG_FMT_LEN      80
+#define DISPLAY_LOG_QUEUE_DEPTH  16
+#define DISPLAY_LOG_STACK_SIZE   1024
+#define DISPLAY_LOG_THREAD_PRIO  K_IDLE_PRIO   /* lowest non-idle priority */
+
+/* Forward declaration — defined after the log buffer is set up */
+static void display_log_add(const char *text, uint8_t r, uint8_t g, uint8_t b);
+
+struct display_log_msg {
+	char     text[DISPLAY_LOG_FMT_LEN];
+	uint8_t  r, g, b;
+};
+
+K_MSGQ_DEFINE(display_log_q, sizeof(struct display_log_msg),
+	      DISPLAY_LOG_QUEUE_DEPTH, 4);
+
+static void display_log_thread_fn(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+
+	struct display_log_msg msg;
+
+	while (true) {
+		k_msgq_get(&display_log_q, &msg, K_FOREVER);
+		display_log_add(msg.text, msg.r, msg.g, msg.b);
+	}
+}
+
+K_THREAD_DEFINE(display_log_tid, DISPLAY_LOG_STACK_SIZE,
+		display_log_thread_fn, NULL, NULL, NULL,
+		DISPLAY_LOG_THREAD_PRIO, 0, 0);
+
 /* Command IDs */
 #define CMD_DRAW_TEXT     0x18
 #define CMD_SET_BG_COLOR  0x19
@@ -193,7 +226,6 @@ static void display_log_redraw(int new_lines)
 }
 
 #define DISPLAY_LOG_WRAP_LEN  35
-#define DISPLAY_LOG_FMT_LEN  80
 
 static void display_log_push_line(const char *text, size_t len,
 				  uint8_t r, uint8_t g, uint8_t b)
@@ -268,47 +300,43 @@ void display_header(device_type_t type, uint16_t device_id)
 	display_redraw_header();
 }
 
-void DISPLAY_LOG_INF(const char *fmt, ...)
+static void display_log_enqueue(const char *fmt, va_list args,
+				uint8_t r, uint8_t g, uint8_t b)
 {
 	if (!display_ready) {
 		return;
 	}
 
-	char line[DISPLAY_LOG_FMT_LEN];
+	struct display_log_msg msg = { .r = r, .g = g, .b = b };
+
+	vsnprintf(msg.text, sizeof(msg.text), fmt, args);
+
+	/* Non-blocking: drop the message if the queue is full */
+	if (k_msgq_put(&display_log_q, &msg, K_NO_WAIT) != 0) {
+		LOG_WRN("display log queue full, message dropped");
+	}
+}
+
+void DISPLAY_LOG_INF(const char *fmt, ...)
+{
 	va_list args;
 	va_start(args, fmt);
-	vsnprintf(line, sizeof(line), fmt, args);
+	display_log_enqueue(fmt, args, 255, 255, 255);
 	va_end(args);
-
-	display_log_add(line, 255, 255, 255);
 }
 
 void DISPLAY_LOG_WRN(const char *fmt, ...)
 {
-	if (!display_ready) {
-		return;
-	}
-
-	char line[DISPLAY_LOG_FMT_LEN];
 	va_list args;
 	va_start(args, fmt);
-	vsnprintf(line, sizeof(line), fmt, args);
+	display_log_enqueue(fmt, args, 255, 255, 0);
 	va_end(args);
-
-	display_log_add(line, 255, 255, 0);
 }
 
 void DISPLAY_LOG_ERR(const char *fmt, ...)
 {
-	if (!display_ready) {
-		return;
-	}
-
-	char line[DISPLAY_LOG_FMT_LEN];
 	va_list args;
 	va_start(args, fmt);
-	vsnprintf(line, sizeof(line), fmt, args);
+	display_log_enqueue(fmt, args, 255, 0, 0);
 	va_end(args);
-
-	display_log_add(line, 255, 0, 0);
 }

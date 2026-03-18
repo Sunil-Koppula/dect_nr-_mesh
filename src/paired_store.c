@@ -6,7 +6,7 @@
 #include <zephyr/logging/log.h>
 #include "paired_store.h"
 #include "storage.h"
-#include "display.h"
+#include "log_all.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -69,10 +69,10 @@ void paired_store_print(const paired_store_t *ps)
 {
 	uint16_t id;
 
-	LOG_INF("=== Paired %ss (%d) ===", ps->label, paired_store_count(ps));
+	ALL_INF("=== Paired %ss (%d) ===", ps->label, paired_store_count(ps));
 	for (int i = 0; i < ps->max_entries; i++) {
 		if (storage_read(ps->nvs_base + i, &id, sizeof(id)) == 0) {
-			LOG_INF("  [%d] %s ID:%d", i, ps->label, id);
+			ALL_INF("  [%d] %s ID:%d", i, ps->label, id);
 		}
 	}
 }

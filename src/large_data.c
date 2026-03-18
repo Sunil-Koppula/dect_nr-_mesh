@@ -24,6 +24,7 @@
 #include "queue.h"
 #include "state.h"
 #include "display.h"
+#include "log_all.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -125,7 +126,7 @@ void large_data_cleanup_stale_sessions(void)
 
 		if (s->state == LARGE_DATA_STATE_RECEIVING &&
 		    (now - s->last_activity_ms) > LARGE_DATA_SESSION_TIMEOUT_MS) {
-			LOG_WRN("Session for ID:%d timed out (%d/%d frags), freeing slot %d",
+			ALL_WRN("Session for ID:%d timed out (%d/%d frags), freeing slot %d",
 				s->src_device_id, s->frags_received,
 				s->frag_total, s->flash_slot);
 			s->state = LARGE_DATA_STATE_IDLE;
@@ -159,7 +160,7 @@ static void process_transfer(const large_data_transfer_packet_t *pkt,
 	}
 
 	if (pkt->frag_num >= s->frag_total) {
-		LOG_WRN("Fragment %d out of range (total:%d)",
+		ALL_WRN("Fragment %d out of range (total:%d)",
 			pkt->frag_num, s->frag_total);
 		return;
 	}
@@ -168,7 +169,7 @@ static void process_transfer(const large_data_transfer_packet_t *pkt,
 	uint32_t offset = (uint32_t)pkt->frag_num * LARGE_DATA_FRAG_SIZE;
 
 	if (offset + payload_len > s->total_size) {
-		LOG_WRN("Fragment %d would overflow buffer", pkt->frag_num);
+		ALL_WRN("Fragment %d would overflow buffer", pkt->frag_num);
 		return;
 	}
 
@@ -181,7 +182,7 @@ static void process_transfer(const large_data_transfer_packet_t *pkt,
 	int err = flash_store_write(s->flash_slot, offset,
 				    pkt->payload, payload_len);
 	if (err) {
-		LOG_WRN("Flash write frag %d failed, err %d",
+		ALL_WRN("Flash write frag %d failed, err %d",
 			pkt->frag_num, err);
 		return;
 	}
@@ -206,7 +207,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 	large_data_rx_session_t *s = find_session(pkt->src_device_id);
 
 	if (!s || s->state != LARGE_DATA_STATE_RECEIVING) {
-		LOG_WRN("No active session for sender ID:%d", pkt->src_device_id);
+		ALL_WRN("No active session for sender ID:%d", pkt->src_device_id);
 		return;
 	}
 
@@ -217,7 +218,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		uint32_t offset = (uint32_t)pkt->frag_num * LARGE_DATA_FRAG_SIZE;
 
 		if (offset + payload_len > s->total_size) {
-			LOG_WRN("Last fragment would overflow buffer");
+			ALL_WRN("Last fragment would overflow buffer");
 			free_session(s);
 			return;
 		}
@@ -225,7 +226,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		int err = flash_store_write(s->flash_slot, offset,
 					    pkt->payload, payload_len);
 		if (err) {
-			LOG_WRN("Flash write last frag failed, err %d", err);
+			ALL_WRN("Flash write last frag failed, err %d", err);
 			free_session(s);
 			return;
 		}
@@ -234,7 +235,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		s->frags_received++;
 	}
 
-	LOG_INF("Received %d/%d fragments from ID:%d, verifying CRC...",
+	ALL_INF("Received %d/%d fragments from ID:%d, verifying CRC...",
 		s->frags_received, s->frag_total, pkt->src_device_id);
 
 	/* Verify CRC over entire reassembled data in flash */
@@ -242,7 +243,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 						      s->total_size);
 
 	if (calc_crc == s->crc16) {
-		LOG_INF("Large data CRC OK (%d bytes from ID:%d)",
+		ALL_INF("Large data CRC OK (%d bytes from ID:%d)",
 			s->total_size, pkt->src_device_id);
 		s->state = LARGE_DATA_STATE_COMPLETE;
 
@@ -275,7 +276,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		}
 	}
 
-	LOG_WRN("Large data CRC FAIL missing %d/%d frags", missing_count, s->frag_total);
+	ALL_WRN("Large data CRC FAIL missing %d/%d frags", missing_count, s->frag_total);
 
 	/* Dump data at missing fragment offsets and nearby boundaries */
 	for (uint16_t f = 0; f < s->frag_total; f++) {
@@ -291,7 +292,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 
 	/* If no missing frags, scan all fragment starts for 0xFF (unwritten) */
 	if (missing_count == 0) {
-		LOG_WRN("  All frags marked received — scanning for unwritten flash");
+		ALL_WRN("  All frags marked received — scanning for unwritten flash");
 		uint16_t corrupt_count = 0;
 		for (uint16_t f = 0; f < s->frag_total && corrupt_count < 16; f++) {
 			uint32_t off = (uint32_t)f * LARGE_DATA_FRAG_SIZE;
@@ -351,7 +352,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 				pending_responses[i].free_session = false;
 				s->state = LARGE_DATA_STATE_RECEIVING;
 				s->frags_received--;
-				LOG_INF("NACK with %d/%d missing frags",
+				ALL_INF("NACK with %d/%d missing frags",
 					send_count, missing_count);
 			} else {
 				large_data_ack_packet_t *ack =
@@ -378,7 +379,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 	}
 
 	if (pkt->total_size > LARGE_DATA_MAX_SIZE) {
-		LOG_ERR("Data too large (%d > %d)", pkt->total_size,
+		ALL_ERR("Data too large (%d > %d)", pkt->total_size,
 			LARGE_DATA_MAX_SIZE);
 		return;
 	}
@@ -394,7 +395,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 	}
 
 	if (!s) {
-		LOG_ERR("No free reassembly sessions");
+		ALL_ERR("No free reassembly sessions");
 		return;
 	}
 
@@ -403,7 +404,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 	int err = flash_store_erase_slot(slot);
 
 	if (err) {
-		LOG_ERR("Flash erase slot %d failed, err %d", slot, err);
+		ALL_ERR("Flash erase slot %d failed, err %d", slot, err);
 		s->state = LARGE_DATA_STATE_IDLE;
 		return;
 	}
@@ -421,7 +422,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 	s->last_activity_ms = k_uptime_get();
 	memset(s->frag_bitmap, 0, sizeof(s->frag_bitmap));
 
-	LOG_INF("Reassembly started for ID:%d (slot:%d, %d bytes, %d frags)",
+	ALL_INF("Reassembly started for ID:%d (slot:%d, %d bytes, %d frags)",
 		pkt->src_device_id, slot, pkt->total_size,
 		pkt->frag_total);
 }
@@ -495,7 +496,7 @@ void large_data_handle_init(const large_data_init_packet_t *pkt)
 		return;
 	}
 
-	LOG_INF("Large data INIT from ID:%d type:%d size:%d frags:%d last:%d",
+	ALL_INF("Large data INIT from ID:%d type:%d size:%d frags:%d last:%d",
 		pkt->src_device_id, pkt->file_type, pkt->total_size,
 		pkt->frag_total, pkt->last_frag_size);
 
@@ -588,20 +589,20 @@ void large_data_send_pending_ack(uint32_t tx_handle)
 				   pending_responses[i].len);
 
 		if (err) {
-			LOG_ERR("Failed to send large data response, err %d", err);
+			ALL_ERR("Failed to send large data response, err %d", err);
 		} else {
 			k_sem_take(&operation_sem, K_FOREVER);
 			if (pkt_type == PACKET_TYPE_LARGE_DATA_ACK) {
 				large_data_ack_packet_t *ack =
 					(large_data_ack_packet_t *)pending_responses[i].data;
-				LOG_INF("Large data ACK sent to ID:%d (status:%s)",
+				ALL_INF("Large data ACK sent to ID:%d (status:%s)",
 					ack->dst_device_id,
 					ack->status == LARGE_DATA_ACK_SUCCESS ?
 						"OK" : "CRC_FAIL");
 			} else if (pkt_type == PACKET_TYPE_LARGE_DATA_NACK) {
 				large_data_nack_packet_t *nack =
 					(large_data_nack_packet_t *)pending_responses[i].data;
-				LOG_INF("Large data NACK sent to ID:%d (%d missing frags)",
+				ALL_INF("Large data NACK sent to ID:%d (%d missing frags)",
 					nack->dst_device_id, nack->frag_count);
 			}
 		}
@@ -658,7 +659,7 @@ static int tx_with_retry(uint32_t tx_handle, void *data, size_t len)
 		}
 		k_sleep(K_MSEC(10 + retries * 5));
 	}
-	LOG_ERR("TX failed after retries, err %d", last_op_err);
+	ALL_ERR("TX failed after retries, err %d", last_op_err);
 	return -EIO;
 }
 
@@ -681,7 +682,7 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 	uint16_t crc = compute_crc16(data, data_len);
 	int err;
 
-	LOG_INF("Large data send: %d bytes, %d frags, last:%d, CRC:0x%04x",
+	ALL_INF("Large data send: %d bytes, %d frags, last:%d, CRC:0x%04x",
 		data_len, frag_total, last_frag_size, crc);
 
 	/* Step 1: Send INIT */
@@ -748,13 +749,13 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		}
 	}
 
-	LOG_INF("All %d fragments sent, waiting for ACK...", frag_total);
+	ALL_INF("All %d fragments sent, waiting for ACK...", frag_total);
 
 	/* Step 4: Wait for ACK/NACK, retransmit on NACK */
 	for (int retransmit = 0; retransmit <= RETRANSMIT_MAX; retransmit++) {
 		err = receive_ms(rx_handle, 10000);
 		if (err) {
-			LOG_ERR("Receive for ACK failed, err %d", err);
+			ALL_ERR("Receive for ACK failed, err %d", err);
 			return err;
 		}
 		k_sem_take(&operation_sem, K_FOREVER);
@@ -775,10 +776,10 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 					(const large_data_ack_packet_t *)item.data;
 				if (ack->dst_device_id == device_id) {
 					if (ack->status == LARGE_DATA_ACK_SUCCESS) {
-						LOG_INF("Large data transfer SUCCESS");
+						ALL_INF("Large data transfer SUCCESS");
 						return 0;
 					}
-					LOG_WRN("Large data transfer FAILED: CRC mismatch");
+					ALL_WRN("Large data transfer FAILED: CRC mismatch");
 					return -EIO;
 				}
 			}
@@ -800,7 +801,7 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		}
 
 		if (got_nack && retransmit < RETRANSMIT_MAX) {
-			LOG_INF("NACK received: %d missing frags, retransmitting (attempt %d/%d)",
+			ALL_INF("NACK received: %d missing frags, retransmitting (attempt %d/%d)",
 				nack_frag_count, retransmit + 1, RETRANSMIT_MAX);
 
 			/* Wait for the receiver to finish NACK processing and
@@ -882,17 +883,17 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 				}
 			}
 
-			LOG_INF("Retransmission done, waiting for ACK...");
+			ALL_INF("Retransmission done, waiting for ACK...");
 			continue;
 		}
 
 		if (!got_nack) {
-			LOG_WRN("No ACK/NACK received for large data transfer");
+			ALL_WRN("No ACK/NACK received for large data transfer");
 			return -ETIMEDOUT;
 		}
 	}
 
-	LOG_WRN("Large data transfer failed after %d retransmit attempts",
+	ALL_WRN("Large data transfer failed after %d retransmit attempts",
 		RETRANSMIT_MAX);
 	return -EIO;
 }

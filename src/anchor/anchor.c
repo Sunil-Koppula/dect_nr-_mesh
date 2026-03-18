@@ -14,7 +14,7 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include "anchor.h"
-#include "../display.h"
+#include "../log_all.h"
 #include "../packet.h"
 #include "../radio.h"
 #include "../queue.h"
@@ -85,26 +85,26 @@ static int anchor_do_pairing(void)
 	int err;
 
 	for (int attempt = 0; attempt < PAIR_RETRY_MAX; attempt++) {
-		LOG_INF("Pairing attempt %d/%d", attempt + 1, PAIR_RETRY_MAX);
+		ALL_INF("Pairing attempt %d/%d", attempt + 1, PAIR_RETRY_MAX);
 
 		uint32_t rand_num = next_random();
 		uint32_t expected_hash = compute_pair_hash(device_id, rand_num);
 
 		err = send_pair_request(TX_HANDLE, rand_num);
 		if (err) {
-			LOG_ERR("Failed to send pair request, err %d", err);
+			ALL_ERR("Failed to send pair request, err %d", err);
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
 		k_sem_take(&operation_sem, K_FOREVER);
 
-		LOG_INF("Pair request sent, listening for responses...");
+		ALL_INF("Pair request sent, listening for responses...");
 
 		discovery_reset();
 
 		err = receive(RX_HANDLE);
 		if (err) {
-			LOG_ERR("Receive failed, err %d", err);
+			ALL_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -129,7 +129,7 @@ static int anchor_do_pairing(void)
 					continue;
 				}
 				discovery_add_response(resp, item.rssi_2);
-				LOG_INF("Got pair response from %s ID:%d hop:%d",
+				ALL_INF("Got pair response from %s ID:%d hop:%d",
 					device_type_str(resp->device_type),
 					resp->device_id, resp->hop_num);
 			}
@@ -138,19 +138,19 @@ static int anchor_do_pairing(void)
 		k_sleep(K_MSEC(10));
 
 		if (discovery_count() == 0) {
-			LOG_WRN("No responses received, retrying...");
+			ALL_WRN("No responses received, retrying...");
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
 
 		const struct discovery_candidate *best = discovery_best();
 
-		LOG_INF("Best candidate: %s ID:%d hop:%d RSSI:%d",
+		ALL_INF("Best candidate: %s ID:%d hop:%d RSSI:%d",
 			device_type_str(best->device_type),
 			best->device_id, best->hop_num, best->rssi_2 / 2);
 
 		if (best->hash != expected_hash) {
-			LOG_WRN("Hash mismatch, retrying...");
+			ALL_WRN("Hash mismatch, retrying...");
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -158,7 +158,7 @@ static int anchor_do_pairing(void)
 		err = send_pair_confirm(TX_HANDLE, best->device_id,
 				       PAIR_STATUS_SUCCESS);
 		if (err) {
-			LOG_ERR("Failed to send pair confirm, err %d", err);
+			ALL_ERR("Failed to send pair confirm, err %d", err);
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -174,21 +174,21 @@ static int anchor_do_pairing(void)
 
 		err = anchor_store_identity(&identity);
 		if (err) {
-			LOG_ERR("Failed to store identity, err %d", err);
+			ALL_ERR("Failed to store identity, err %d", err);
 			return err;
 		}
 
 		my_hop_num = best->hop_num + 1;
 		parent_id = best->device_id;
 
-		LOG_INF("Paired with %s ID:%d (parent hop:%d, my hop:%d)",
+		ALL_INF("Paired with %s ID:%d (parent hop:%d, my hop:%d)",
 			device_type_str(best->device_type),
 			best->device_id, best->hop_num, my_hop_num);
 
 		return 0;
 	}
 
-	LOG_ERR("Pairing failed after %d attempts", PAIR_RETRY_MAX);
+	ALL_ERR("Pairing failed after %d attempts", PAIR_RETRY_MAX);
 	return -ETIMEDOUT;
 }
 
@@ -196,19 +196,19 @@ static int anchor_do_pairing(void)
 
 static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2)
 {
-	LOG_INF("Pair request from %s ID:%d (RSSI:%d)",
+	ALL_INF("Pair request from %s ID:%d (RSSI:%d)",
 		device_type_str(pkt->device_type), pkt->device_id, rssi_2 / 2);
 
 	uint32_t hash = compute_pair_hash(pkt->device_id, pkt->random_num);
 
 	int err = send_pair_response(TX_HANDLE, pkt->device_id, hash);
 	if (err) {
-		LOG_ERR("Failed to send pair response, err %d", err);
+		ALL_ERR("Failed to send pair response, err %d", err);
 		return;
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
 
-	LOG_INF("Pair response sent to ID:%d", pkt->device_id);
+	ALL_INF("Pair response sent to ID:%d", pkt->device_id);
 }
 
 static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
@@ -218,7 +218,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 		return;
 	}
 
-	LOG_INF("Pair confirm from %s ID:%d status:%s",
+	ALL_INF("Pair confirm from %s ID:%d status:%s",
 		device_type_str(pkt->device_type), pkt->device_id,
 		(pkt->status == PAIR_STATUS_SUCCESS) ? "SUCCESS" : "FAILURE");
 
@@ -233,7 +233,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 	} else if (pkt->device_type == DEVICE_TYPE_ANCHOR) {
 		store = &anchor_store;
 	} else {
-		LOG_WRN("Unexpected device type %d in pair confirm",
+		ALL_WRN("Unexpected device type %d in pair confirm",
 			pkt->device_type);
 		return;
 	}
@@ -241,10 +241,10 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 	int err = paired_store_add(store, pkt->device_id);
 
 	if (err) {
-		LOG_ERR("Failed to store %s ID:%d, err %d",
+		ALL_ERR("Failed to store %s ID:%d, err %d",
 			store->label, pkt->device_id, err);
 	} else {
-		LOG_INF("%s ID:%d paired and stored in NVM",
+		ALL_INF("%s ID:%d paired and stored in NVM",
 			store->label, pkt->device_id);
 	}
 }
@@ -265,10 +265,10 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	uint8_t status = (rx_crc == calc_crc) ? DATA_ACK_SUCCESS : DATA_ACK_CRC_FAIL;
 
 	if (status == DATA_ACK_SUCCESS) {
-		LOG_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
+		ALL_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
 			pkt->src_device_id, payload_len, rssi_2 / 2);
 	} else {
-		LOG_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
+		ALL_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
 			pkt->src_device_id, payload_len, rssi_2 / 2);
 	}
 
@@ -284,11 +284,11 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	int err = transmit_and_wait(&ack, sizeof(ack));
 
 	if (err) {
-		LOG_ERR("Failed to send data ACK, err %d", err);
+		ALL_ERR("Failed to send data ACK, err %d", err);
 		return;
 	}
 
-	LOG_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
+	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
 		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
 
 	/* Only relay upstream if CRC was good */
@@ -310,12 +310,12 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	err = transmit_and_wait(relay_buf, relay_len);
 
 	if (err) {
-		LOG_ERR("Failed to relay data to parent ID:%d, err %d",
+		ALL_ERR("Failed to relay data to parent ID:%d, err %d",
 			parent_id, err);
 		return;
 	}
 
-	LOG_INF("Data relayed from ID:%d to parent ID:%d",
+	ALL_INF("Data relayed from ID:%d to parent ID:%d",
 		pkt->src_device_id, parent_id);
 }
 
@@ -362,10 +362,10 @@ static void process_queue(void)
 					(const data_ack_packet_t *)item.data;
 				if (ack->dst_device_id == device_id) {
 					if (ack->status == DATA_ACK_SUCCESS) {
-						LOG_INF("Parent ACK from ID:%d: SUCCESS",
+						ALL_INF("Parent ACK from ID:%d: SUCCESS",
 							ack->src_device_id);
 					} else {
-						LOG_WRN("Parent ACK from ID:%d: CRC FAIL",
+						ALL_WRN("Parent ACK from ID:%d: CRC FAIL",
 							ack->src_device_id);
 					}
 				}
@@ -384,7 +384,7 @@ static void process_queue(void)
 			break;
 
 		default:
-			LOG_WRN("Unknown packet type 0x%02x", pkt_type);
+			ALL_WRN("Unknown packet type 0x%02x", pkt_type);
 			break;
 		}
 	}
@@ -394,7 +394,7 @@ static void process_queue(void)
 
 void anchor_main(void)
 {
-	LOG_INF("Anchor mode started (ID:%d)", device_id);
+	ALL_INF("Anchor mode started (ID:%d)", device_id);
 
 	/* Check if already paired with a parent */
 	node_identity_t identity;
@@ -403,20 +403,20 @@ void anchor_main(void)
 	    anchor_load_identity(&identity) == 0) {
 		my_hop_num = identity.parent_hop + 1;
 		parent_id = identity.parent_id;
-		LOG_INF("Already paired with parent ID:%d (parent hop:%d, my hop:%d)",
+		ALL_INF("Already paired with parent ID:%d (parent hop:%d, my hop:%d)",
 			identity.parent_id, identity.parent_hop, my_hop_num);
 	} else {
-		LOG_INF("Not paired, starting discovery...");
+		ALL_INF("Not paired, starting discovery...");
 		int err = anchor_do_pairing();
 		if (err) {
-			LOG_ERR("Pairing failed, err %d", err);
+			ALL_ERR("Pairing failed, err %d", err);
 			return;
 		}
 	}
 
 	node_identity_t self;
 	if (anchor_load_identity(&self) == 0) {
-		LOG_INF("Anchor: ID:%d parent:%d parent_hop:%d my_hop:%d",
+		ALL_INF("Anchor: ID:%d parent:%d parent_hop:%d my_hop:%d",
 			self.device_id, self.parent_id, self.parent_hop,
 			self.parent_hop + 1);
 	}
@@ -425,7 +425,7 @@ void anchor_main(void)
 
 	int flash_err = flash_store_init();
 	if (flash_err) {
-		LOG_ERR("Flash store init failed, err %d", flash_err);
+		ALL_ERR("Flash store init failed, err %d", flash_err);
 		return;
 	}
 	large_data_init();
@@ -434,7 +434,7 @@ void anchor_main(void)
 	while (true) {
 		int err = receive(RX_HANDLE);
 		if (err) {
-			LOG_ERR("Receive failed, err %d", err);
+			ALL_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
@@ -486,14 +486,14 @@ void anchor_main(void)
 			if (large_data_get_completed(&ld_slot, &ld_size,
 						     &ld_file_type,
 						     &ld_src_id)) {
-				LOG_INF("Relaying %d bytes from ID:%d to parent ID:%d (flash slot:%d)",
+				ALL_INF("Relaying %d bytes from ID:%d to parent ID:%d (flash slot:%d)",
 					ld_size, ld_src_id, parent_id,
 					ld_slot);
 
 				uint8_t *relay_buf = k_malloc(ld_size);
 
 				if (!relay_buf) {
-					LOG_ERR("Failed to allocate %d bytes for relay",
+					ALL_ERR("Failed to allocate %d bytes for relay",
 						ld_size);
 					large_data_free_completed(ld_src_id);
 				} else {
@@ -511,7 +511,7 @@ void anchor_main(void)
 							&relay_buf[offset],
 							chunk);
 						if (rerr) {
-							LOG_ERR("Flash read failed at offset %d, err %d",
+							ALL_ERR("Flash read failed at offset %d, err %d",
 								offset, rerr);
 							read_ok = false;
 							break;
@@ -527,10 +527,10 @@ void anchor_main(void)
 							ld_file_type,
 							relay_buf, ld_size);
 						if (relay_err) {
-							LOG_ERR("Failed to relay large data, err %d",
+							ALL_ERR("Failed to relay large data, err %d",
 								relay_err);
 						} else {
-							LOG_INF("Large data relay to parent complete");
+							ALL_INF("Large data relay to parent complete");
 						}
 					}
 

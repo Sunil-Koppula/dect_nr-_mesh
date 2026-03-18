@@ -20,7 +20,7 @@
 #include "../state.h"
 #include "../storage.h"
 #include "../large_data.h"
-#include "../display.h"
+#include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -53,7 +53,7 @@ static int sensor_do_pairing(void)
 	int err;
 
 	for (int attempt = 0; attempt < PAIR_RETRY_MAX; attempt++) {
-		LOG_INF("Pairing attempt %d/%d", attempt + 1, PAIR_RETRY_MAX);
+		ALL_INF("Pairing attempt %d/%d", attempt + 1, PAIR_RETRY_MAX);
 
 		/* Generate random and send pair request (broadcast) */
 		uint32_t rand_num = next_random();
@@ -61,20 +61,21 @@ static int sensor_do_pairing(void)
 
 		err = send_pair_request(TX_HANDLE, rand_num);
 		if (err) {
-			LOG_ERR("Failed to send pair request, err %d", err);
+			ALL_ERR("Failed to send pair request, err %d", err);
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
 		k_sem_take(&operation_sem, K_FOREVER);
 
-		LOG_INF("Pair request sent, listening for responses...");
+		ALL_INF("Pair request sent, listening for responses...");
+
 
 		/* Start receiving to collect pair responses */
 		discovery_reset();
 
 		err = receive(RX_HANDLE);
 		if (err) {
-			LOG_ERR("Receive failed, err %d", err);
+			ALL_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -99,7 +100,7 @@ static int sensor_do_pairing(void)
 					continue;
 				}
 				discovery_add_response(resp, item.rssi_2);
-				LOG_INF("Got pair response from %s ID:%d hop:%d",
+				ALL_INF("Got pair response from %s ID:%d hop:%d",
 					device_type_str(resp->device_type),
 					resp->device_id, resp->hop_num);
 			}
@@ -108,7 +109,7 @@ static int sensor_do_pairing(void)
 		k_sleep(K_MSEC(10));
 
 		if (discovery_count() == 0) {
-			LOG_WRN("No responses received, retrying...");
+			ALL_WRN("No responses received, retrying...");
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -116,13 +117,13 @@ static int sensor_do_pairing(void)
 		/* Pick best candidate */
 		const struct discovery_candidate *best = discovery_best();
 
-		LOG_INF("Best candidate: %s ID:%d hop:%d RSSI:%d",
+		ALL_INF("Best candidate: %s ID:%d hop:%d RSSI:%d",
 			device_type_str(best->device_type),
 			best->device_id, best->hop_num, best->rssi_2 / 2);
 
 		/* Verify hash */
 		if (best->hash != expected_hash) {
-			LOG_WRN("Hash mismatch, retrying...");
+			ALL_WRN("Hash mismatch, retrying...");
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -131,7 +132,7 @@ static int sensor_do_pairing(void)
 		err = send_pair_confirm(TX_HANDLE, best->device_id,
 				       PAIR_STATUS_SUCCESS);
 		if (err) {
-			LOG_ERR("Failed to send pair confirm, err %d", err);
+			ALL_ERR("Failed to send pair confirm, err %d", err);
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
@@ -147,18 +148,18 @@ static int sensor_do_pairing(void)
 
 		err = sensor_store_identity(&identity);
 		if (err) {
-			LOG_ERR("Failed to store identity, err %d", err);
+			ALL_ERR("Failed to store identity, err %d", err);
 			return err;
 		}
 
-		LOG_INF("Paired with %s ID:%d (parent hop:%d)",
+		ALL_INF("Paired with %s ID:%d (parent hop:%d)",
 			device_type_str(best->device_type),
 			best->device_id, best->hop_num);
 
 		return 0;
 	}
 
-	LOG_ERR("Pairing failed after %d attempts", PAIR_RETRY_MAX);
+	ALL_ERR("Pairing failed after %d attempts", PAIR_RETRY_MAX);
 	return -ETIMEDOUT;
 }
 
@@ -179,12 +180,12 @@ static void sensor_send_data(void)
 		.sensor_id = device_id,
 	};
 
-	LOG_INF("Sending data seq:%d to parent ID:%d", payload.seq, parent_id);
+	ALL_INF("Sending data seq:%d to parent ID:%d", payload.seq, parent_id);
 
 	int err = send_data(TX_HANDLE, parent_id,
 			    &payload, sizeof(payload));
 	if (err) {
-		LOG_ERR("Failed to send data, err %d", err);
+		ALL_ERR("Failed to send data, err %d", err);
 		return;
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
@@ -192,7 +193,7 @@ static void sensor_send_data(void)
 	/* Listen for ACK (short window) */
 	err = receive_ms(RX_HANDLE, 5000);
 	if (err) {
-		LOG_ERR("Receive failed, err %d", err);
+		ALL_ERR("Receive failed, err %d", err);
 		return;
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
@@ -212,10 +213,10 @@ static void sensor_send_data(void)
 			(const data_ack_packet_t *)item.data;
 		if (ack->dst_device_id == device_id) {
 			if (ack->status == DATA_ACK_SUCCESS) {
-				LOG_INF("Data ACK from ID:%d: SUCCESS",
+				ALL_INF("Data ACK from ID:%d: SUCCESS",
 					ack->src_device_id);
 			} else {
-				LOG_WRN("Data ACK from ID:%d: CRC FAIL",
+				ALL_WRN("Data ACK from ID:%d: CRC FAIL",
 					ack->src_device_id);
 			}
 			acked = true;
@@ -223,7 +224,7 @@ static void sensor_send_data(void)
 	}
 
 	if (!acked) {
-		LOG_WRN("No ACK received for seq:%d", payload.seq - 1);
+		ALL_WRN("No ACK received for seq:%d", payload.seq - 1);
 	}
 }
 
@@ -231,7 +232,7 @@ static void sensor_send_data(void)
 
 void sensor_main(void)
 {
-	LOG_INF("Sensor mode started (ID:%d)", device_id);
+	ALL_INF("Sensor mode started (ID:%d)", device_id);
 
 	/* Check if already paired */
 	node_identity_t identity;
@@ -239,13 +240,13 @@ void sensor_main(void)
 	if (sensor_has_identity() &&
 	    sensor_load_identity(&identity) == 0) {
 		parent_id = identity.parent_id;
-		LOG_INF("Already paired with parent ID:%d (parent hop:%d)",
+		ALL_INF("Already paired with parent ID:%d (parent hop:%d)",
 			identity.parent_id, identity.parent_hop);
 	} else {
-		LOG_INF("Not paired, starting discovery...");
+		ALL_INF("Not paired, starting discovery...");
 		int err = sensor_do_pairing();
 		if (err) {
-			LOG_ERR("Pairing failed, err %d", err);
+			ALL_ERR("Pairing failed, err %d", err);
 			return;
 		}
 		/* parent_id set by sensor_do_pairing via identity store */
@@ -256,10 +257,10 @@ void sensor_main(void)
 
 	large_data_send_count = 0;
 
-	LOG_INF("Sensor ready:");
-	LOG_INF("  Button 2: send small data");
-	LOG_INF("  Button 3: send 50KB sequential");
-	LOG_INF("  Button 4: send 75KB sequential");
+	ALL_INF("Sensor ready:");
+	ALL_INF("  Button 2: send small data");
+	ALL_INF("  Button 3: send 50KB sequential");
+	ALL_INF("  Button 4: send 75KB sequential");
 
 	while (true) {
 		/* Check all button semaphores with short timeout */
@@ -272,14 +273,14 @@ void sensor_main(void)
 			uint32_t size = 50 * 1024;
 			uint8_t *buf = k_malloc(size);
 			if (!buf) {
-				LOG_ERR("Failed to allocate 50KB buffer");
+				ALL_ERR("Failed to allocate 50KB buffer");
 				continue;
 			}
 			uint8_t start = large_data_send_count;
 			for (uint32_t i = 0; i < size; i++) {
 				buf[i] = (uint8_t)(start + i);
 			}
-			LOG_INF("Sending 50KB sequential (start:0x%02x) to parent ID:%d",
+			ALL_INF("Sending 50KB sequential (start:0x%02x) to parent ID:%d",
 				start, parent_id);
 			large_data_send(TX_HANDLE, RX_HANDLE,
 					parent_id, LARGE_DATA_FILE_DATA,
@@ -293,14 +294,14 @@ void sensor_main(void)
 			uint32_t size = 75 * 1024;
 			uint8_t *buf = k_malloc(size);
 			if (!buf) {
-				LOG_ERR("Failed to allocate 75KB buffer");
+				ALL_ERR("Failed to allocate 75KB buffer");
 				continue;
 			}
 			uint8_t start = large_data_send_count;
 			for (uint32_t i = 0; i < size; i++) {
 				buf[i] = (uint8_t)(start + i);
 			}
-			LOG_INF("Sending 75KB sequential (start:0x%02x) to parent ID:%d",
+			ALL_INF("Sending 75KB sequential (start:0x%02x) to parent ID:%d",
 				start, parent_id);
 			large_data_send(TX_HANDLE, RX_HANDLE,
 					parent_id, LARGE_DATA_FILE_DATA,
