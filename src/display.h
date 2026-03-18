@@ -32,10 +32,4 @@ void DISPLAY_LOG_INF(const char *fmt, ...);
 void DISPLAY_LOG_WRN(const char *fmt, ...);
 void DISPLAY_LOG_ERR(const char *fmt, ...);
 
-/* Log to both Zephyr LOG and display */
-#define ALL_ERR(fmt, ...) do { LOG_ERR(fmt, ##__VA_ARGS__); DISPLAY_LOG_ERR(fmt, ##__VA_ARGS__); } while (0)
-#define ALL_WRN(fmt, ...) do { LOG_WRN(fmt, ##__VA_ARGS__); DISPLAY_LOG_WRN(fmt, ##__VA_ARGS__); } while (0)
-#define ALL_INF(fmt, ...) do { LOG_INF(fmt, ##__VA_ARGS__); DISPLAY_LOG_INF(fmt, ##__VA_ARGS__); } while (0)
-#define ALL_DBG(fmt, ...) do { LOG_DBG(fmt, ##__VA_ARGS__); DISPLAY_LOG_INF(fmt, ##__VA_ARGS__); } while (0)
-
 #endif /* DISPLAY_H */

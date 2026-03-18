@@ -20,6 +20,7 @@
 #include "../state.h"
 #include "../storage.h"
 #include "../large_data.h"
+#include "../display.h"
 
 LOG_MODULE_DECLARE(app);
 

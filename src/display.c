@@ -158,9 +158,12 @@ static void display_redraw_header(void)
 	display_draw_string(0, 10, "----------------------------------------------------------------", 15, 255, 255, 255);
 }
 
-static void display_log_redraw(void)
+static bool need_full_redraw;
+
+static void display_log_redraw(int new_lines)
 {
-	if (log_count >= DISPLAY_LOG_MAX_LINES) {
+	if (need_full_redraw) {
+		need_full_redraw = false;
 		display_clear();
 		display_set_bg(0, 0, 0);
 
@@ -176,17 +179,21 @@ static void display_log_redraw(void)
 						log_buffer[i].b);
 		}
 	} else {
-		/* Just draw the new line */
-		int i = log_count - 1;
-		display_draw_string(0, 30 + i * 20,
-					log_buffer[i].text, 15,
-					log_buffer[i].r,
-					log_buffer[i].g,
-					log_buffer[i].b);
+		/* Draw only the newly added lines */
+		int start = log_count - new_lines;
+
+		for (int i = start; i < log_count; i++) {
+			display_draw_string(0, 30 + i * 20,
+						log_buffer[i].text, 15,
+						log_buffer[i].r,
+						log_buffer[i].g,
+						log_buffer[i].b);
+		}
 	}
 }
 
-#define DISPLAY_LOG_WRAP_LEN 35
+#define DISPLAY_LOG_WRAP_LEN  35
+#define DISPLAY_LOG_FMT_LEN  80
 
 static void display_log_push_line(const char *text, size_t len,
 				  uint8_t r, uint8_t g, uint8_t b)
@@ -195,6 +202,7 @@ static void display_log_push_line(const char *text, size_t len,
 		memmove(&log_buffer[0], &log_buffer[1],
 			sizeof(struct log_entry) * (DISPLAY_LOG_MAX_LINES - 1));
 		log_count = DISPLAY_LOG_MAX_LINES - 1;
+		need_full_redraw = true;
 	}
 
 	size_t copy_len = (len < DISPLAY_LOG_LINE_LEN - 1) ? len : (DISPLAY_LOG_LINE_LEN - 1);
@@ -206,26 +214,44 @@ static void display_log_push_line(const char *text, size_t len,
 	log_count++;
 }
 
+static size_t find_wrap_point(const char *text, size_t len)
+{
+	if (len <= DISPLAY_LOG_WRAP_LEN) {
+		return len;
+	}
+
+	/* Search backward from wrap limit for a space */
+	for (size_t i = DISPLAY_LOG_WRAP_LEN; i > 0; i--) {
+		if (text[i] == ' ') {
+			return i;
+		}
+	}
+
+	/* No space found, hard break */
+	return DISPLAY_LOG_WRAP_LEN;
+}
+
 static void display_log_add(const char *text, uint8_t r, uint8_t g, uint8_t b)
 {
 	size_t total_len = strlen(text);
 	const char *p = text;
+	int new_lines = 0;
 
-	/* First line */
-	size_t chunk = (total_len > DISPLAY_LOG_WRAP_LEN) ? DISPLAY_LOG_WRAP_LEN : total_len;
-	display_log_push_line(p, chunk, r, g, b);
-	p += chunk;
-	total_len -= chunk;
-
-	/* Remaining wrapped lines */
 	while (total_len > 0) {
-		chunk = (total_len > DISPLAY_LOG_WRAP_LEN) ? DISPLAY_LOG_WRAP_LEN : total_len;
+		size_t chunk = find_wrap_point(p, total_len);
 		display_log_push_line(p, chunk, r, g, b);
+		new_lines++;
 		p += chunk;
 		total_len -= chunk;
+
+		/* Skip the space at the break point */
+		if (total_len > 0 && *p == ' ') {
+			p++;
+			total_len--;
+		}
 	}
 
-	display_log_redraw();
+	display_log_redraw(new_lines);
 }
 
 void display_header(device_type_t type, uint16_t device_id)
@@ -248,7 +274,7 @@ void DISPLAY_LOG_INF(const char *fmt, ...)
 		return;
 	}
 
-	char line[DISPLAY_LOG_LINE_LEN];
+	char line[DISPLAY_LOG_FMT_LEN];
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(line, sizeof(line), fmt, args);
@@ -263,7 +289,7 @@ void DISPLAY_LOG_WRN(const char *fmt, ...)
 		return;
 	}
 
-	char line[DISPLAY_LOG_LINE_LEN];
+	char line[DISPLAY_LOG_FMT_LEN];
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(line, sizeof(line), fmt, args);
@@ -278,7 +304,7 @@ void DISPLAY_LOG_ERR(const char *fmt, ...)
 		return;
 	}
 
-	char line[DISPLAY_LOG_LINE_LEN];
+	char line[DISPLAY_LOG_FMT_LEN];
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(line, sizeof(line), fmt, args);

@@ -449,10 +449,19 @@ void anchor_main(void)
 			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
 				/* END arrived — cancel RX to send ACK now */
 				nrf_modem_dect_phy_cancel(RX_HANDLE);
-				/* Cancel generates on_op_complete + on_cancel.
-				 * Wait for both callbacks to fire. */
+				/* Cancel generates two events:
+				 * 1) EVT_CANCELED (on_cancel)
+				 * 2) EVT_COMPLETED with err 4105 (on_op_complete)
+				 * We must consume both before proceeding to TX,
+				 * otherwise the stale op_complete can be mistaken
+				 * for a TX completion in send_pending_ack.
+				 * Since operation_sem has max count 1, if both
+				 * fire before we take, one is lost. Take the
+				 * first, then wait for the second with timeout. */
 				k_sem_take(&operation_sem, K_FOREVER);
-				k_sleep(K_MSEC(50));
+				if (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+					k_sleep(K_MSEC(50));
+				}
 				k_sem_reset(&operation_sem);
 				cancelled = true;
 				break;

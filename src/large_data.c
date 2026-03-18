@@ -23,6 +23,7 @@
 #include "radio.h"
 #include "queue.h"
 #include "state.h"
+#include "display.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -274,9 +275,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		}
 	}
 
-	LOG_WRN("Large data CRC FAIL (expected:0x%04x got:0x%04x, "
-		"missing %d/%d frags)",
-		s->crc16, calc_crc, missing_count, s->frag_total);
+	LOG_WRN("Large data CRC FAIL missing %d/%d frags", missing_count, s->frag_total);
 
 	/* Dump data at missing fragment offsets and nearby boundaries */
 	for (uint16_t f = 0; f < s->frag_total; f++) {
@@ -804,7 +803,11 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 			LOG_INF("NACK received: %d missing frags, retransmitting (attempt %d/%d)",
 				nack_frag_count, retransmit + 1, RETRANSMIT_MAX);
 
-			k_sleep(K_MSEC(10));
+			/* Wait for the receiver to finish NACK processing and
+			 * return to RX mode before we retransmit. The receiver
+			 * needs to cancel its current RX, send the NACK, run
+			 * cleanup, and restart RX — typically ~100-200ms. */
+			k_sleep(K_MSEC(1000));
 
 			for (uint8_t f = 0; f < nack_frag_count; f++) {
 				uint16_t frag_num = nack_frags[f];
