@@ -9,6 +9,7 @@
 #include "queue.h"
 #include "state.h"
 #include "large_data.h"
+#include "display.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -16,6 +17,7 @@ K_SEM_DEFINE(operation_sem, 0, 1);
 K_SEM_DEFINE(deinit_sem, 0, 1);
 
 bool exit_flag;
+volatile int16_t last_rssi_dbm;
 volatile int last_op_err;
 
 struct nrf_modem_dect_phy_config_params dect_phy_config_params = {
@@ -166,6 +168,8 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 		return;
 	}
 
+	last_rssi_dbm = evt->rssi_2 / 2;
+	display_update_rssi(last_rssi_dbm);
 	rx_queue_put(evt->data, evt->len, evt->rssi_2);
 }
 
@@ -221,6 +225,10 @@ void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt)
 	case NRF_MODEM_DECT_PHY_EVT_PDC_ERROR:
 		on_pdc_crc_err(&evt->pdc_crc_err);
 		break;
+	// case NRF_MODEM_DECT_PHY_EVT_TEST_RF_TX_CW_CONTROL_CONFIG:
+	// 	LOG_INF("CW test evt: err %d", evt->test_rf_tx_cw_control.err);
+	// 	k_sem_give(&operation_sem);
+	// 	break;
 	default:
 		break;
 	}
@@ -233,7 +241,7 @@ int transmit(uint32_t handle, void *data, size_t data_len)
 	struct phy_ctrl_field_common header = {
 		.header_format = 0x0,
 		.packet_length_type = 0x0,
-		.packet_length = 0x01,
+		.packet_length = 0x04,
 		.short_network_id = (CONFIG_NETWORK_ID & 0xff),
 		.transmitter_id_hi = (device_id >> 8),
 		.transmitter_id_lo = (device_id & 0xff),
@@ -267,7 +275,7 @@ int receive(uint32_t handle)
 		.mode = NRF_MODEM_DECT_PHY_RX_MODE_CONTINUOUS,
 		.rssi_interval = NRF_MODEM_DECT_PHY_RSSI_INTERVAL_OFF,
 		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
-		.rssi_level = -60,
+		.rssi_level = -100,
 		.carrier = CONFIG_CARRIER,
 		.duration = CONFIG_RX_PERIOD_S * MSEC_PER_SEC *
 			    NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
@@ -288,7 +296,7 @@ int receive_ms(uint32_t handle, uint32_t duration_ms)
 		.mode = NRF_MODEM_DECT_PHY_RX_MODE_CONTINUOUS,
 		.rssi_interval = NRF_MODEM_DECT_PHY_RSSI_INTERVAL_OFF,
 		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
-		.rssi_level = -60,
+		.rssi_level = -100,
 		.carrier = CONFIG_CARRIER,
 		.duration = duration_ms * NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
 		.filter.short_network_id = CONFIG_NETWORK_ID & 0xff,

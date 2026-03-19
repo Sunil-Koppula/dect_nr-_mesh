@@ -9,6 +9,7 @@
 #include <zephyr/sys/reboot.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
+#include <nrf_modem_at.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <dk_buttons_and_leds.h>
 #include "packet.h"
@@ -113,6 +114,24 @@ int main(void)
 		LOG_ERR("event_handler_set failed, err %d", err);
 		return err;
 	}
+
+	// /* --- CW TX power test (must run before phy_init) --- */
+	// LOG_INF("CW test: +19 dBm on carrier %d for 5s — check SA at J1", CONFIG_CARRIER);
+	// err = nrf_modem_dect_phy_test_rf_tx_cw_control(
+	// 	NRF_MODEM_DECT_PHY_TEST_RF_TX_CW_OPER_ON,
+	// 	CONFIG_CARRIER, 19);
+	// if (err) {
+	// 	LOG_ERR("CW start failed: %d", err);
+	// } else {
+	// 	k_sem_take(&operation_sem, K_FOREVER);
+	// 	k_sleep(K_SECONDS(100));
+	// 	nrf_modem_dect_phy_test_rf_tx_cw_control(
+	// 		NRF_MODEM_DECT_PHY_TEST_RF_TX_CW_OPER_OFF,
+	// 		CONFIG_CARRIER, 0);
+	// 	k_sem_take(&operation_sem, K_FOREVER);
+	// 	LOG_INF("CW test done");
+	// }
+	// /* --- End CW test --- */
 
 	err = nrf_modem_dect_phy_init();
 	if (err) {

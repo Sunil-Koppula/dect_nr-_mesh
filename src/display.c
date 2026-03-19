@@ -85,6 +85,7 @@ static int log_count;
 static device_type_t header_type;
 static uint16_t header_device_id;
 static bool header_saved;
+static int16_t header_rssi_dbm = 1;  /* sentinel: 1 = no packet received yet */
 
 static void uart_send(const uint8_t *data, size_t len)
 {
@@ -175,19 +176,28 @@ static void display_redraw_header(void)
 	switch (header_type)
 	{
 	case DEVICE_TYPE_GATEWAY:
-		display_draw_string(60, 0, "GATEWAY", 15, 0, 255, 255);
+		display_draw_string(10, 0, "GATEWAY", 15, 0, 255, 255);
 		break;
 	case DEVICE_TYPE_ANCHOR:
-		display_draw_string(60, 0, "ANCHOR", 15, 0, 255, 255);
+		display_draw_string(10, 0, "ANCHOR", 15, 0, 255, 255);
 		break;
 	case DEVICE_TYPE_SENSOR:
-		display_draw_string(60, 0, "SENSOR", 15, 0, 255, 255);
+		display_draw_string(10, 0, "SENSOR", 15, 0, 255, 255);
 		break;
 	default:
-		display_draw_string(60, 0, "UNKNOWN", 15, 0, 255, 255);
+		display_draw_string(10, 0, "UNKNOWN", 15, 0, 255, 255);
 		break;
 	}
-	display_draw_string(160, 0, line, 15, 0, 255, 255);
+	display_draw_string(100, 0, line, 15, 0, 255, 255);
+
+	char rssi_str[16];
+	if (header_rssi_dbm == 1) {
+		snprintf(rssi_str, sizeof(rssi_str), "RSSI:");
+	} else {
+		snprintf(rssi_str, sizeof(rssi_str), "RSSI:%ddBm", header_rssi_dbm);
+	}
+	display_draw_string(180, 0, rssi_str, 15, 0, 255, 0);
+
 	display_draw_string(0, 10, "----------------------------------------------------------------", 15, 255, 255, 255);
 }
 
@@ -298,6 +308,19 @@ void display_header(device_type_t type, uint16_t device_id)
 	header_saved = true;
 
 	display_redraw_header();
+}
+
+void display_update_rssi(int16_t rssi_dbm)
+{
+	if (!display_ready || !header_saved) {
+		return;
+	}
+
+	header_rssi_dbm = rssi_dbm;
+
+	// char rssi_str[16];
+	// snprintf(rssi_str, sizeof(rssi_str), "RSSI:%ddBm", rssi_dbm);
+	// display_draw_string(180, 0, rssi_str, 15, 0, 255, 0);
 }
 
 static void display_log_enqueue(const char *fmt, va_list args,

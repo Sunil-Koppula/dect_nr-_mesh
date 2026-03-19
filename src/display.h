@@ -27,6 +27,9 @@ void display_draw_string(uint16_t x, uint16_t y, const char *text, uint8_t font_
 /* Draw device type and ID header (called on startup after PHY init) */
 void display_header(device_type_t type, uint16_t device_id);
 
+/* Update the RSSI value shown in the header area */
+void display_update_rssi(int16_t rssi_dbm);
+
 /* Log a message on the display */
 void DISPLAY_LOG_INF(const char *fmt, ...);
 void DISPLAY_LOG_WRN(const char *fmt, ...);

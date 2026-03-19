@@ -22,6 +22,9 @@ extern uint16_t device_id;
 extern device_type_t my_device_type;
 extern uint8_t my_hop_num;
 
+/* Last received RSSI in dBm (updated on every PDC, defined in radio.c) */
+extern volatile int16_t last_rssi_dbm;
+
 /* Button semaphores (defined in main.c) */
 extern struct k_sem btn2_sem;  /* small data send */
 extern struct k_sem btn3_sem;  /* 50KB large data send */
