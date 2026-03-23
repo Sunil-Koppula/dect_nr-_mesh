@@ -28,6 +28,7 @@ typedef enum {
 	PACKET_TYPE_LARGE_DATA_END	  	= 0x08,
 	PACKET_TYPE_LARGE_DATA_ACK      = 0x09,
 	PACKET_TYPE_LARGE_DATA_NACK     = 0x0A,
+	PACKET_TYPE_STREAM_REQUEST      = 0x0B,
 } packet_type_t;
 
 /* Pairing confirm status codes */
@@ -174,6 +175,15 @@ typedef struct {
 /* Max missing frags per NACK packet */
 #define LARGE_DATA_NACK_MAX_FRAGS \
 	((DATA_LEN_MAX - LARGE_DATA_NACK_PACKET_SIZE) / sizeof(uint16_t))
+
+/* Stream Request — sensor asks gateway to stream data for 60s every 500ms */
+typedef struct {
+	uint8_t packet_type;
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+} __attribute__((packed)) stream_request_packet_t;
+
+#define STREAM_REQUEST_PACKET_SIZE sizeof(stream_request_packet_t)
 
 /* Get device type as string */
 static inline const char *device_type_str(device_type_t type)

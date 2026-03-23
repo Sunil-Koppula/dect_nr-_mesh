@@ -154,6 +154,54 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
 }
 
+
+/* === Stream mode: send data every 500ms for 60s === */
+
+#define STREAM_DURATION_MS  60000
+#define STREAM_INTERVAL_MS  500
+
+static void handle_stream_request(const stream_request_packet_t *pkt)
+{
+	if (pkt->dst_device_id != device_id) {
+		return;
+	}
+
+	ALL_INF("Stream request from ID:%d -- streaming for 60s every 500ms",
+		pkt->src_device_id);
+
+	int64_t end_time = k_uptime_get() + STREAM_DURATION_MS;
+	uint32_t seq = 0;
+
+	while (k_uptime_get() < end_time) {
+		struct {
+			uint8_t  packet_type;
+			uint16_t src_device_id;
+			uint16_t dst_device_id;
+			uint32_t seq;
+			int64_t  timestamp_ms;
+		} __attribute__((packed)) out = {
+			.packet_type   = PACKET_TYPE_DATA,
+			.src_device_id = device_id,
+			.dst_device_id = pkt->src_device_id,
+			.seq           = seq++,
+			.timestamp_ms  = k_uptime_get(),
+		};
+
+		int err = transmit_and_wait(&out, sizeof(out));
+		if (err) {
+			ALL_WRN("Stream TX failed seq:%d err:%d", seq - 1, err);
+		} else if ((seq - 1) % 10 == 0) {
+			ALL_INF("Stream TX seq:%d to ID:%d", seq - 1,
+				pkt->src_device_id);
+		}
+
+		k_sleep(K_MSEC(STREAM_INTERVAL_MS));
+	}
+
+	ALL_INF("Stream to ID:%d complete (%d packets sent)",
+		pkt->src_device_id, seq);
+}
+
 /* === Process all queued packets (called when RX window ends) === */
 
 static void process_queue(void)
@@ -195,6 +243,13 @@ static void process_queue(void)
 		case PACKET_TYPE_LARGE_DATA_TRANSFER:
 		case PACKET_TYPE_LARGE_DATA_END:
 			/* Handled by flash writer thread via ring buffer */
+			break;
+
+		case PACKET_TYPE_STREAM_REQUEST:
+			if (item.len >= STREAM_REQUEST_PACKET_SIZE) {
+				handle_stream_request(
+					(const stream_request_packet_t *)item.data);
+			}
 			break;
 
 		case PACKET_TYPE_DATA_ACK:

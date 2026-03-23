@@ -27,9 +27,9 @@ LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 
 /* ---------- LCD log queue & worker thread ---------- */
 #define DISPLAY_LOG_FMT_LEN      80
-#define DISPLAY_LOG_QUEUE_DEPTH  16
+#define DISPLAY_LOG_QUEUE_DEPTH  32
 #define DISPLAY_LOG_STACK_SIZE   1024
-#define DISPLAY_LOG_THREAD_PRIO  K_IDLE_PRIO   /* lowest non-idle priority */
+#define DISPLAY_LOG_THREAD_PRIO  10
 
 /* Forward declaration — defined after the log buffer is set up */
 static void display_log_add(const char *text, uint8_t r, uint8_t g, uint8_t b);

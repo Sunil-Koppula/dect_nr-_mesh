@@ -260,7 +260,7 @@ void sensor_main(void)
 	ALL_INF("Sensor ready:");
 	ALL_INF("  Button 2: send small data");
 	ALL_INF("  Button 3: send 50KB sequential");
-	ALL_INF("  Button 4: send 75KB sequential");
+	ALL_INF("  Button 4: request 60s data stream from gateway");
 
 	while (true) {
 		/* Check all button semaphores with short timeout */
@@ -290,24 +290,71 @@ void sensor_main(void)
 			continue;
 		}
 		if (k_sem_take(&btn4_sem, K_MSEC(50)) == 0) {
-			/* 75KB sequential: starting byte increments each send */
-			uint32_t size = 75 * 1024;
-			uint8_t *buf = k_malloc(size);
-			if (!buf) {
-				ALL_ERR("Failed to allocate 75KB buffer");
+			/* Send stream request to gateway, then listen for 60s of streamed data */
+			stream_request_packet_t req = {
+				.packet_type   = PACKET_TYPE_STREAM_REQUEST,
+				.src_device_id = device_id,
+				.dst_device_id = parent_id,
+			};
+
+			ALL_INF("Sending stream request to parent ID:%d", parent_id);
+
+			int err = transmit(TX_HANDLE, &req, sizeof(req));
+			if (err) {
+				ALL_ERR("Stream request TX failed, err %d", err);
 				continue;
 			}
-			uint8_t start = large_data_send_count;
-			for (uint32_t i = 0; i < size; i++) {
-				buf[i] = (uint8_t)(start + i);
+			k_sem_take(&operation_sem, K_FOREVER);
+
+			/* Listen for streamed data for 60s */
+			ALL_INF("Listening for streamed data (60s)...");
+			err = receive_ms(RX_HANDLE, 60000);
+			if (err) {
+				ALL_ERR("Receive failed, err %d", err);
+				continue;
 			}
-			ALL_INF("Sending 75KB sequential (start:0x%02x) to parent ID:%d",
-				start, parent_id);
-			large_data_send(TX_HANDLE, RX_HANDLE,
-					parent_id, LARGE_DATA_FILE_DATA,
-					buf, size);
-			k_free(buf);
-			large_data_send_count++;
+
+			/* Drain the RX queue continuously while receiving */
+			struct rx_queue_item item;
+			int count = 0;
+
+			while (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+				while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+					if (item.len < 5 ||
+					    item.data[0] != PACKET_TYPE_DATA) {
+						continue;
+					}
+					uint16_t dst_id;
+					memcpy(&dst_id, &item.data[3],
+					       sizeof(dst_id));
+					if (dst_id != device_id) {
+						continue;
+					}
+					count++;
+					if (count % 10 == 0) {
+						ALL_INF("Received: %d", count);
+					}
+				}
+			}
+
+			/* Drain any remaining packets after RX completes */
+			while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+				if (item.len < 5 ||
+				    item.data[0] != PACKET_TYPE_DATA) {
+					continue;
+				}
+				uint16_t dst_id;
+				memcpy(&dst_id, &item.data[3],
+				       sizeof(dst_id));
+				if (dst_id != device_id) {
+					continue;
+				}
+				count++;
+				if (count % 10 == 0) {
+					ALL_INF("Received: %d", count);
+				}
+			}
+			ALL_INF("Stream done: received %d packets", count);
 			continue;
 		}
 	}

@@ -319,6 +319,103 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		pkt->src_device_id, parent_id);
 }
 
+/* === Stream relay: forward request upstream, relay data back down === */
+
+#define STREAM_DURATION_MS  60000
+#define STREAM_INTERVAL_MS  500
+
+static void handle_stream_request(const stream_request_packet_t *pkt)
+{
+	if (pkt->dst_device_id != device_id) {
+		return;
+	}
+
+	uint16_t requester_id = pkt->src_device_id;
+
+	ALL_INF("Stream request from ID:%d -- forwarding to parent ID:%d",
+		requester_id, parent_id);
+
+	/* Forward request upstream, with ourselves as the target so
+	 * the gateway/parent streams back to us */
+	stream_request_packet_t fwd = {
+		.packet_type   = PACKET_TYPE_STREAM_REQUEST,
+		.src_device_id = device_id,
+		.dst_device_id = parent_id,
+	};
+
+	int err = transmit_and_wait(&fwd, sizeof(fwd));
+	if (err) {
+		ALL_ERR("Failed to forward stream request, err %d", err);
+		return;
+	}
+
+	/* Listen and relay: receive from parent, retransmit to sensor */
+	ALL_INF("Relaying stream data to ID:%d (60s)...", requester_id);
+
+	err = receive_ms(RX_HANDLE, STREAM_DURATION_MS);
+	if (err) {
+		ALL_ERR("Receive for stream relay failed, err %d", err);
+		return;
+	}
+
+	struct rx_queue_item item;
+	uint32_t relayed = 0;
+
+	while (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+		while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+			if (item.len < 1 || item.data[0] != PACKET_TYPE_DATA) {
+				continue;
+			}
+
+			/* Cancel RX briefly to transmit relay packet */
+			nrf_modem_dect_phy_cancel(RX_HANDLE);
+			k_sem_take(&operation_sem, K_FOREVER);
+			if (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+				k_sleep(K_MSEC(50));
+			}
+			k_sem_reset(&operation_sem);
+
+			/* Rewrite destination to the requesting sensor */
+			uint8_t relay_buf[DATA_LEN_MAX];
+			uint16_t relay_len = item.len < DATA_LEN_MAX
+					   ? item.len : DATA_LEN_MAX;
+			memcpy(relay_buf, item.data, relay_len);
+
+			/* Overwrite src to anchor, dst to requesting sensor */
+			uint16_t src_id = device_id;
+			uint16_t dst_id = requester_id;
+			memcpy(&relay_buf[1], &src_id, sizeof(src_id));
+			memcpy(&relay_buf[3], &dst_id, sizeof(dst_id));
+
+			err = transmit_and_wait(relay_buf, relay_len);
+			if (err) {
+				ALL_WRN("Stream relay TX failed, err %d", err);
+			} else {
+				relayed++;
+				if (relayed % 10 == 0) {
+					ALL_INF("Stream relayed: %d", relayed);
+				}
+			}
+
+			/* Resume receiving */
+			err = receive_ms(RX_HANDLE, STREAM_DURATION_MS);
+			if (err) {
+				ALL_ERR("Resume RX failed, err %d", err);
+				goto stream_done;
+			}
+		}
+	}
+
+	/* Drain remaining */
+	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+		relayed++;
+	}
+
+stream_done:
+	ALL_INF("Stream relay done: %d packets relayed to ID:%d",
+		relayed, requester_id);
+}
+
 /* === Process all queued packets (called when RX window ends) === */
 
 static void process_queue(void)
@@ -376,6 +473,13 @@ static void process_queue(void)
 		case PACKET_TYPE_LARGE_DATA_TRANSFER:
 		case PACKET_TYPE_LARGE_DATA_END:
 			/* Handled by flash writer thread via ring buffer */
+			break;
+
+		case PACKET_TYPE_STREAM_REQUEST:
+			if (item.len >= STREAM_REQUEST_PACKET_SIZE) {
+				handle_stream_request(
+					(const stream_request_packet_t *)item.data);
+			}
 			break;
 
 		case PACKET_TYPE_LARGE_DATA_ACK:

@@ -10,7 +10,7 @@
 #include <zephyr/kernel.h>
 #include "packet.h"
 
-#define RX_QUEUE_SIZE 16
+#define RX_QUEUE_SIZE 128
 
 /* Received packet item */
 struct rx_queue_item {
