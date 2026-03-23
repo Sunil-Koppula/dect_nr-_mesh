@@ -22,4 +22,5 @@ target_sources(app PRIVATE
   src/gateway/gateway.c
   src/anchor/anchor.c
   src/sensor/sensor.c
+  src/psram.c
 )

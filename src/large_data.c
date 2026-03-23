@@ -1,16 +1,20 @@
 /*
  * Large data transfer protocol for DECT NR+ mesh network
  *
- * Fragment data is stored on external SPI flash instead of RAM.
- * Only the fragment bitmap (~1.3KB per session) lives in RAM.
+ * Fragment data is stored in external SPI PSRAM (8MB) instead of internal RAM.
+ * Only the fragment bitmap (~1.3KB per session) lives in internal RAM.
  * This allows 4 concurrent sessions of up to 256KB each.
  *
- * INIT: queued to main thread (flash erase not ISR-safe)
- * TRANSFER: queued to flash writer thread via ring buffer
- * END: queued to flash writer thread via ring buffer
+ * PSRAM layout (4 slots, 256KB each, starting at offset 0):
+ *   Slot 0: 0x000000 - 0x03FFFF
+ *   Slot 1: 0x040000 - 0x07FFFF
+ *   Slot 2: 0x080000 - 0x0BFFFF
+ *   Slot 3: 0x0C0000 - 0x0FFFFF
  *
- * SPI flash operations are NOT ISR-safe (they use mutexes/sleep),
- * so all flash writes happen in a dedicated worker thread.
+ * INIT/TRANSFER/END: queued to writer thread via ring buffer
+ *
+ * SPI operations are NOT ISR-safe (they use mutexes/sleep),
+ * so all PSRAM writes happen in a dedicated worker thread.
  */
 
 #include <string.h>
@@ -18,7 +22,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include "large_data.h"
-#include "flash_store.h"
+#include "psram.h"
 #include "mesh.h"
 #include "radio.h"
 #include "queue.h"
@@ -28,8 +32,8 @@
 
 LOG_MODULE_DECLARE(app);
 
-BUILD_ASSERT(LARGE_DATA_MAX_SESSIONS == FLASH_STORE_MAX_SLOTS,
-	     "Session count must match flash slot count");
+BUILD_ASSERT(LARGE_DATA_MAX_SESSIONS * LARGE_DATA_SLOT_SIZE <= PSRAM_SIZE,
+	     "PSRAM must have enough space for all session slots");
 
 #define RETRANSMIT_MAX 5
 
@@ -37,8 +41,7 @@ BUILD_ASSERT(LARGE_DATA_MAX_SESSIONS == FLASH_STORE_MAX_SLOTS,
 
 /*
  * Ring buffer entries for queuing fragment writes from ISR to worker thread.
- * Flash writes on SPI NOR can stall briefly at page/sector boundaries,
- * so we need enough depth to absorb those pauses without dropping fragments.
+ * SPI PSRAM writes are fast but still not ISR-safe, so we buffer here.
  * At ~200 frags/sec arrival rate, 512 entries gives ~2.5 sec of buffering.
  */
 #define FRAG_RING_SIZE 512
@@ -63,15 +66,15 @@ static struct frag_ring_entry frag_ring[FRAG_RING_SIZE];
 static volatile uint32_t frag_ring_head; /* written by ISR */
 static volatile uint32_t frag_ring_tail; /* read by worker */
 
-/* Semaphore to wake the flash writer thread */
+/* Semaphore to wake the PSRAM writer thread */
 static K_SEM_DEFINE(frag_write_sem, 0, K_SEM_MAX_LIMIT);
 
-/* Flash writer thread — high priority so it drains the ring
+/* PSRAM writer thread — high priority so it drains the ring
  * faster than fragments arrive, preventing overflow */
-#define FLASH_WRITER_STACK_SIZE 2048
-#define FLASH_WRITER_PRIORITY 2
-static K_THREAD_STACK_DEFINE(flash_writer_stack, FLASH_WRITER_STACK_SIZE);
-static struct k_thread flash_writer_thread;
+#define PSRAM_WRITER_STACK_SIZE 2048
+#define PSRAM_WRITER_PRIORITY 2
+static K_THREAD_STACK_DEFINE(psram_writer_stack, PSRAM_WRITER_STACK_SIZE);
+static struct k_thread psram_writer_thread;
 
 /* ===== Receiver: reassembly sessions ===== */
 
@@ -128,7 +131,7 @@ void large_data_cleanup_stale_sessions(void)
 		    (now - s->last_activity_ms) > LARGE_DATA_SESSION_TIMEOUT_MS) {
 			ALL_WRN("Session for ID:%d timed out (%d/%d frags), freeing slot %d",
 				s->src_device_id, s->frags_received,
-				s->frag_total, s->flash_slot);
+				s->frag_total, s->psram_slot);
 			s->state = LARGE_DATA_STATE_IDLE;
 		}
 	}
@@ -144,7 +147,12 @@ bool large_data_any_active_session(void)
 	return false;
 }
 
-/* ===== Flash writer: processes fragment ring in thread context ===== */
+/* ===== PSRAM writer: processes fragment ring in thread context ===== */
+
+static inline uint32_t psram_slot_offset(uint8_t slot, uint32_t offset)
+{
+	return (uint32_t)slot * LARGE_DATA_SLOT_SIZE + offset;
+}
 
 static void process_transfer(const large_data_transfer_packet_t *pkt,
 			     uint16_t len)
@@ -173,16 +181,16 @@ static void process_transfer(const large_data_transfer_packet_t *pkt,
 		return;
 	}
 
-	/* Skip if already received (avoid double-write to programmed flash) */
+	/* Skip if already received */
 	if (s->frag_bitmap[pkt->frag_num / 8] & (1 << (pkt->frag_num % 8))) {
 		return;
 	}
 
-	/* Write fragment to external flash (safe — we're in thread context) */
-	int err = flash_store_write(s->flash_slot, offset,
-				    pkt->payload, payload_len);
+	/* Write fragment to PSRAM (safe — we're in thread context) */
+	int err = psram_write(psram_slot_offset(s->psram_slot, offset),
+			      pkt->payload, payload_len);
 	if (err) {
-		ALL_WRN("Flash write frag %d failed, err %d",
+		ALL_WRN("PSRAM write frag %d failed, err %d",
 			pkt->frag_num, err);
 		return;
 	}
@@ -198,6 +206,46 @@ static void process_transfer(const large_data_transfer_packet_t *pkt,
 	}
 }
 
+/* Compute CRC-16 over data stored in PSRAM (reads in chunks) */
+#define PSRAM_CRC_CHUNK 512
+
+static uint16_t psram_compute_crc16(uint8_t slot, uint32_t total_size)
+{
+	uint8_t buf[PSRAM_CRC_CHUNK];
+	uint16_t crc = 0xFFFF;
+	uint32_t remaining = total_size;
+	uint32_t offset = 0;
+
+	while (remaining > 0) {
+		uint16_t chunk = (remaining > PSRAM_CRC_CHUNK) ?
+				 PSRAM_CRC_CHUNK : (uint16_t)remaining;
+
+		int err = psram_read(psram_slot_offset(slot, offset),
+				     buf, chunk);
+		if (err) {
+			LOG_ERR("PSRAM read for CRC failed at offset %d, err %d",
+				offset, err);
+			return 0;
+		}
+
+		for (uint16_t i = 0; i < chunk; i++) {
+			crc ^= (uint16_t)buf[i] << 8;
+			for (int j = 0; j < 8; j++) {
+				if (crc & 0x8000) {
+					crc = (crc << 1) ^ 0x1021;
+				} else {
+					crc <<= 1;
+				}
+			}
+		}
+
+		offset += chunk;
+		remaining -= chunk;
+	}
+
+	return crc;
+}
+
 static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 {
 	if (pkt->dst_device_id != device_id) {
@@ -211,8 +259,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		return;
 	}
 
-	/* Write last fragment to flash — use last_frag_size from INIT.
-	 * Skip write if already received (avoid double-write to programmed flash). */
+	/* Write last fragment to PSRAM — use last_frag_size from INIT. */
 	if (!(s->frag_bitmap[pkt->frag_num / 8] & (1 << (pkt->frag_num % 8)))) {
 		uint16_t payload_len = s->last_frag_size;
 		uint32_t offset = (uint32_t)pkt->frag_num * LARGE_DATA_FRAG_SIZE;
@@ -223,10 +270,10 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 			return;
 		}
 
-		int err = flash_store_write(s->flash_slot, offset,
-					    pkt->payload, payload_len);
+		int err = psram_write(psram_slot_offset(s->psram_slot, offset),
+				      pkt->payload, payload_len);
 		if (err) {
-			ALL_WRN("Flash write last frag failed, err %d", err);
+			ALL_WRN("PSRAM write last frag failed, err %d", err);
 			free_session(s);
 			return;
 		}
@@ -238,9 +285,8 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 	ALL_INF("Received %d/%d fragments from ID:%d, verifying CRC...",
 		s->frags_received, s->frag_total, pkt->src_device_id);
 
-	/* Verify CRC over entire reassembled data in flash */
-	uint16_t calc_crc = flash_store_compute_crc16(s->flash_slot,
-						      s->total_size);
+	/* Verify CRC over entire reassembled data in PSRAM */
+	uint16_t calc_crc = psram_compute_crc16(s->psram_slot, s->total_size);
 
 	if (calc_crc == s->crc16) {
 		ALL_INF("Large data CRC OK (%d bytes from ID:%d)",
@@ -278,46 +324,32 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 
 	ALL_WRN("Large data CRC FAIL missing %d/%d frags", missing_count, s->frag_total);
 
-	/* Dump data at missing fragment offsets and nearby boundaries */
+	/* Dump data at missing fragment offsets */
 	for (uint16_t f = 0; f < s->frag_total; f++) {
 		if (!(s->frag_bitmap[f / 8] & (1 << (f % 8)))) {
 			uint32_t off = (uint32_t)f * LARGE_DATA_FRAG_SIZE;
 			uint8_t dbg[8];
-			flash_store_read(s->flash_slot, off, dbg, sizeof(dbg));
+			psram_read(psram_slot_offset(s->psram_slot, off),
+				   dbg, sizeof(dbg));
 			LOG_WRN("  Missing frag %d @%d: %02x %02x %02x %02x %02x %02x %02x %02x",
 				f, off, dbg[0], dbg[1], dbg[2], dbg[3],
 				dbg[4], dbg[5], dbg[6], dbg[7]);
 		}
 	}
 
-	/* If no missing frags, scan all fragment starts for 0xFF (unwritten) */
+	/* If no missing frags, dump boundaries for manual inspection */
 	if (missing_count == 0) {
-		ALL_WRN("  All frags marked received — scanning for unwritten flash");
-		uint16_t corrupt_count = 0;
-		for (uint16_t f = 0; f < s->frag_total && corrupt_count < 16; f++) {
+		ALL_WRN("  All frags marked received — dumping boundaries");
+		for (uint16_t f = 0; f < s->frag_total;
+		     f += s->frag_total / 8) {
 			uint32_t off = (uint32_t)f * LARGE_DATA_FRAG_SIZE;
-			uint8_t dbg[4];
-			flash_store_read(s->flash_slot, off, dbg, sizeof(dbg));
-			if (dbg[0] == 0xFF && dbg[1] == 0xFF &&
-			    dbg[2] == 0xFF && dbg[3] == 0xFF) {
-				LOG_WRN("  Frag %d @%d: ERASED (FF FF FF FF)",
-					f, off);
-				corrupt_count++;
-			}
-		}
-		if (corrupt_count == 0) {
-			/* No erased frags — dump boundaries for manual inspection */
-			for (uint16_t f = 0; f < s->frag_total;
-			     f += s->frag_total / 8) {
-				uint32_t off = (uint32_t)f * LARGE_DATA_FRAG_SIZE;
-				uint8_t dbg[8];
-				flash_store_read(s->flash_slot, off, dbg,
-						 sizeof(dbg));
-				LOG_WRN("  Frag %d @%d: %02x %02x %02x %02x %02x %02x %02x %02x",
-					f, off, dbg[0], dbg[1], dbg[2],
-					dbg[3], dbg[4], dbg[5], dbg[6],
-					dbg[7]);
-			}
+			uint8_t dbg[8];
+			psram_read(psram_slot_offset(s->psram_slot, off),
+				   dbg, sizeof(dbg));
+			LOG_WRN("  Frag %d @%d: %02x %02x %02x %02x %02x %02x %02x %02x",
+				f, off, dbg[0], dbg[1], dbg[2],
+				dbg[3], dbg[4], dbg[5], dbg[6],
+				dbg[7]);
 		}
 	}
 
@@ -389,7 +421,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 	uint8_t slot;
 
 	if (s) {
-		slot = s->flash_slot;
+		slot = s->psram_slot;
 	} else {
 		s = alloc_session(&slot);
 	}
@@ -399,21 +431,12 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 		return;
 	}
 
-	/* Erase the flash slot — blocking, but that's fine in this thread.
-	 * Fragments arriving during erase accumulate in the ring buffer. */
-	int err = flash_store_erase_slot(slot);
-
-	if (err) {
-		ALL_ERR("Flash erase slot %d failed, err %d", slot, err);
-		s->state = LARGE_DATA_STATE_IDLE;
-		return;
-	}
-
-	/* Initialize session */
+	/* No erase needed for PSRAM — just overwrite.
+	 * Initialize session. */
 	s->state = LARGE_DATA_STATE_RECEIVING;
 	s->src_device_id = pkt->src_device_id;
 	s->file_type = pkt->file_type;
-	s->flash_slot = slot;
+	s->psram_slot = slot;
 	s->total_size = pkt->total_size;
 	s->frag_total = pkt->frag_total;
 	s->last_frag_size = pkt->last_frag_size;
@@ -427,7 +450,7 @@ static void process_init_in_writer(const large_data_init_packet_t *pkt)
 		pkt->frag_total);
 }
 
-static void flash_writer_entry(void *p1, void *p2, void *p3)
+static void psram_writer_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -476,12 +499,12 @@ void large_data_init(void)
 	frag_ring_head = 0;
 	frag_ring_tail = 0;
 
-	/* Start the flash writer thread */
-	k_thread_create(&flash_writer_thread, flash_writer_stack,
-			FLASH_WRITER_STACK_SIZE,
-			flash_writer_entry, NULL, NULL, NULL,
-			FLASH_WRITER_PRIORITY, 0, K_NO_WAIT);
-	k_thread_name_set(&flash_writer_thread, "flash_writer");
+	/* Start the PSRAM writer thread */
+	k_thread_create(&psram_writer_thread, psram_writer_stack,
+			PSRAM_WRITER_STACK_SIZE,
+			psram_writer_entry, NULL, NULL, NULL,
+			PSRAM_WRITER_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&psram_writer_thread, "psram_writer");
 }
 
 /*
@@ -618,12 +641,12 @@ void large_data_send_pending_ack(uint32_t tx_handle)
 	}
 }
 
-bool large_data_get_completed(uint8_t *flash_slot, uint32_t *size,
+bool large_data_get_completed(uint8_t *psram_slot, uint32_t *size,
 			      uint8_t *file_type, uint16_t *src_id)
 {
 	for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
 		if (sessions[i].state == LARGE_DATA_STATE_COMPLETE) {
-			*flash_slot = sessions[i].flash_slot;
+			*psram_slot = sessions[i].psram_slot;
 			*size = sessions[i].total_size;
 			*file_type = sessions[i].file_type;
 			*src_id = sessions[i].src_device_id;

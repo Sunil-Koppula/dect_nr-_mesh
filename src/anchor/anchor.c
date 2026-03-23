@@ -23,7 +23,7 @@
 #include "../storage.h"
 #include "../paired_store.h"
 #include "../large_data.h"
-#include "../flash_store.h"
+#include "../psram.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -527,9 +527,9 @@ void anchor_main(void)
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
-	int flash_err = flash_store_init();
-	if (flash_err) {
-		ALL_ERR("Flash store init failed, err %d", flash_err);
+	int psram_err = psram_init();
+	if (psram_err) {
+		ALL_ERR("PSRAM init failed, err %d", psram_err);
 		return;
 	}
 	large_data_init();
@@ -590,7 +590,7 @@ void anchor_main(void)
 			if (large_data_get_completed(&ld_slot, &ld_size,
 						     &ld_file_type,
 						     &ld_src_id)) {
-				ALL_INF("Relaying %d bytes from ID:%d to parent ID:%d (flash slot:%d)",
+				ALL_INF("Relaying %d bytes from ID:%d to parent ID:%d (PSRAM slot:%d)",
 					ld_size, ld_src_id, parent_id,
 					ld_slot);
 
@@ -601,30 +601,16 @@ void anchor_main(void)
 						ld_size);
 					large_data_free_completed(ld_src_id);
 				} else {
-					uint32_t remaining = ld_size;
-					uint32_t offset = 0;
-					bool read_ok = true;
+					uint32_t psram_addr =
+						(uint32_t)ld_slot * LARGE_DATA_SLOT_SIZE;
+					int rerr = psram_read(psram_addr,
+							      relay_buf,
+							      ld_size);
 
-					while (remaining > 0) {
-						uint16_t chunk =
-							(remaining > FLASH_STORE_READ_CHUNK)
-							? FLASH_STORE_READ_CHUNK
-							: (uint16_t)remaining;
-						int rerr = flash_store_read(
-							ld_slot, offset,
-							&relay_buf[offset],
-							chunk);
-						if (rerr) {
-							ALL_ERR("Flash read failed at offset %d, err %d",
-								offset, rerr);
-							read_ok = false;
-							break;
-						}
-						offset += chunk;
-						remaining -= chunk;
-					}
-
-					if (read_ok) {
+					if (rerr) {
+						ALL_ERR("PSRAM read failed, err %d",
+							rerr);
+					} else {
 						int relay_err = large_data_send(
 							TX_HANDLE, RX_HANDLE,
 							parent_id,

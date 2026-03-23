@@ -15,8 +15,7 @@
 
 LOG_MODULE_DECLARE(app);
 
-/* Get the external flash device from the chosen node */
-#define EXT_FLASH_NODE DT_CHOSEN(nordic_pm_ext_flash)
+#define EXT_FLASH_NODE DT_NODELABEL(gd25wb256)
 
 static const struct device *flash_dev;
 static bool flash_ready;
@@ -24,14 +23,13 @@ static bool flash_ready;
 int flash_store_init(void)
 {
 	flash_dev = DEVICE_DT_GET(EXT_FLASH_NODE);
-
 	if (!device_is_ready(flash_dev)) {
 		LOG_ERR("External flash device not ready");
 		return -ENODEV;
 	}
 
 	flash_ready = true;
-	LOG_INF("Flash store initialized on %s", flash_dev->name);
+	LOG_INF("External flash initialized");
 	return 0;
 }
 

@@ -21,7 +21,7 @@
 #include "../state.h"
 #include "../paired_store.h"
 #include "../large_data.h"
-#include "../flash_store.h"
+#include "../psram.h"
 #include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
@@ -273,9 +273,9 @@ void gateway_main(void)
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
-	int flash_err = flash_store_init();
-	if (flash_err) {
-		ALL_ERR("Flash store init failed, err %d", flash_err);
+	int psram_err = psram_init();
+	if (psram_err) {
+		ALL_ERR("PSRAM init failed, err %d", psram_err);
 		return;
 	}
 	large_data_init();

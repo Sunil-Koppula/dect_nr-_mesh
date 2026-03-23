@@ -1,15 +1,17 @@
 /*
- * Enable external SPI flash (GD25WB256) for large data reassembly.
- * Partition is defined via Partition Manager (pm.yml), not device tree.
+ * SPI3 bus: both external flash (CS1=P0.20) and PSRAM (CS0=D10) coexist.
+ * The SPI driver selects the correct CS based on the device's reg index.
  */
 
 &gd25wb256 {
 	status = "okay";
 };
 
-/ {
-	chosen {
-		nordic,pm-ext-flash = &gd25wb256;
+&spi3 {
+	psram0: psram0@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
 	};
 };
 

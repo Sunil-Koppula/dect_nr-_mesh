@@ -19,6 +19,7 @@
 #include "anchor/anchor.h"
 #include "sensor/sensor.h"
 #include "display.h"
+#include "psram.h"
 #include <stdio.h>
 
 LOG_MODULE_REGISTER(app);
@@ -87,6 +88,9 @@ int main(void)
 	}
 
 	LOG_INF("DECT NR+ Mesh [%s] started", device_type_str(my_device_type));
+
+	/* PSRAM write-only test — blocks forever, remove after testing */
+	psram_test_read_write();
 
 	/* Initialize NVS storage */
 	err = storage_init();
