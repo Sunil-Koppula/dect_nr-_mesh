@@ -7,6 +7,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/drivers/gpio.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
 #include <nrf_modem_at.h>
@@ -26,9 +27,49 @@ LOG_MODULE_REGISTER(app);
 
 BUILD_ASSERT(CONFIG_CARRIER, "Carrier must be configured according to local regulations");
 
+/* Device-type selection pins from devicetree */
+#define DEVTYPE_PIN0_NODE DT_NODELABEL(devtype_pin0)
+#define DEVTYPE_PIN1_NODE DT_NODELABEL(devtype_pin1)
+
+static const struct gpio_dt_spec devtype_pin0 = GPIO_DT_SPEC_GET(DEVTYPE_PIN0_NODE, gpios);
+static const struct gpio_dt_spec devtype_pin1 = GPIO_DT_SPEC_GET(DEVTYPE_PIN1_NODE, gpios);
+
+/**
+ * Read P0.21 and P0.22 to determine device type.
+ *   P0.21=0, P0.22=0 → Gateway
+ *   P0.21=0, P0.22=1 → Anchor
+ *   P0.21=1, P0.22=0 → Sensor
+ *   P0.21=1, P0.22=1 → Sensor (reserved)
+ */
+static device_type_t device_type_read_pins(void)
+{
+	int bit0, bit1;
+
+	if (!gpio_is_ready_dt(&devtype_pin0) || !gpio_is_ready_dt(&devtype_pin1)) {
+		LOG_ERR("Device-type GPIO not ready, defaulting to Sensor");
+		return DEVICE_TYPE_SENSOR;
+	}
+
+	gpio_pin_configure_dt(&devtype_pin0, GPIO_INPUT);
+	gpio_pin_configure_dt(&devtype_pin1, GPIO_INPUT);
+
+	bit0 = gpio_pin_get_dt(&devtype_pin0);  /* P0.21 */
+	bit1 = gpio_pin_get_dt(&devtype_pin1);  /* P0.22 */
+
+	LOG_INF("Device-type pins: P0.21=%d P0.22=%d", bit0, bit1);
+
+	if (bit0 == 0 && bit1 == 0) {
+		return DEVICE_TYPE_GATEWAY;
+	} else if (bit0 == 0 && bit1 == 1) {
+		return DEVICE_TYPE_ANCHOR;
+	} else {
+		return DEVICE_TYPE_SENSOR;
+	}
+}
+
 /* Shared device state */
 uint16_t device_id;
-device_type_t my_device_type = (device_type_t)CONFIG_DEVICE_TYPE;
+device_type_t my_device_type;
 uint8_t my_hop_num;
 
 /* Factory reset: hold button 1 for 2 seconds */
@@ -82,6 +123,8 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 int main(void)
 {
 	int err;
+
+	my_device_type = device_type_read_pins();
 
 	if (my_device_type == DEVICE_TYPE_GATEWAY) {
 		my_hop_num = 0;

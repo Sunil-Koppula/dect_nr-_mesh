@@ -1,10 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [string]$sn,
-
-    [Parameter(Mandatory=$true)]
-    [ValidateSet("gateway", "anchor", "sensor")]
-    [string]$type
+    [string]$sn
 )
 
 # Segger Serial Number
@@ -14,16 +10,16 @@ $sn3 = "1052071448"
 
 $modem_firmware = "c:\ncs\mfw-nr+-phy_nrf91x1_2.0.0.zip"
 $CurrentDirectory = (Get-Location).Path.Replace('\', '/')
-$app_hex = "$CurrentDirectory/build_$type/merged.hex"
+$app_hex = "$CurrentDirectory/build/merged.hex"
 
 # Check that the build exists
 if (-not (Test-Path $app_hex)) {
     Write-Host "Build not found: $app_hex" -ForegroundColor Red
-    Write-Host "Run ./build_$type.ps1 first" -ForegroundColor Yellow
+    Write-Host "Run ./build.ps1 first" -ForegroundColor Yellow
     exit 1
 }
 
-Write-Host "`n=== Flashing $($type.ToUpper()) to device $sn ===" -ForegroundColor Cyan
+Write-Host "`n=== Flashing firmware to device $sn ===" -ForegroundColor Cyan
 
 # # Upgrade Modem Firmware (uncomment to use)
 # Write-Host "Programming Modem Firmware..." -ForegroundColor Yellow
@@ -39,4 +35,4 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Resetting board..." -ForegroundColor Green
 nrfjprog --reset -s $sn
 
-Write-Host "`nDone! Connect serial terminal at 115200 baud to see output." -ForegroundColor Cyan
+Write-Host "`nDone! Device type will be determined by GPIO pins P0.21/P0.22 at boot." -ForegroundColor Cyan

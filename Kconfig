@@ -4,15 +4,6 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
-config DEVICE_TYPE
-	int "Device type (1=gateway, 2=anchor, 3=sensor)"
-	range 1 3
-	default 3
-	help
-	   1 = Gateway: root node (hop 0), collects data from the mesh.
-	   2 = Anchor: relay node, extends mesh coverage.
-	   3 = Sensor: leaf node, sends data upstream.
-
 config CARRIER
 	int "Carrier to use"
 	default 0

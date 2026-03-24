@@ -1,4 +1,26 @@
 /*
+ * Device-type selection pins (active-low, internal pull-up):
+ *   P0.21  P0.23  →  type
+ *     0      0       Gateway
+ *     0      1       Anchor
+ *     1      0       Sensor
+ *     1      1       (reserved, defaults to Sensor)
+ */
+/ {
+	device_type_pins {
+		compatible = "gpio-keys";
+		devtype_pin0: devtype_pin0 {
+			gpios = <&gpio0 21 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "Device type bit 0";
+		};
+		devtype_pin1: devtype_pin1 {
+			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "Device type bit 1";
+		};
+	};
+};
+
+/*
  * SPI3 bus: both external flash (CS1=P0.20) and PSRAM (CS0=D10) coexist.
  * The SPI driver selects the correct CS based on the device's reg index.
  */

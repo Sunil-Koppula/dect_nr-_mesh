@@ -1,59 +1,29 @@
-param(
-    [string[]]$skip = @()
-)
+$venvPath = "c:/ncs/.venv3.2.3"
+$activateScript = "$venvPath/Scripts/Activate.ps1"
+$CurrentDirectory = (Get-Location).Path.Replace('\', '/')
 
-# Normalize skip values to lowercase for safety
-$skip = $skip | ForEach-Object { $_.ToLower() }
-
-$ErrorActionPreference = "Stop"
-
-Write-Output "Cleaning old build folders..."
-
-# Map components to folders
-$components = @{
-    "sensor"  = "build_sensor"
-    "anchor"  = "build_anchor"
-    "gateway" = "build_gateway"
-}
-
-foreach ($key in $components.Keys) {
-    $folder = $components[$key]
-
-    if ($skip -contains $key) {
-        Write-Output "Skipping clean for $key"
-        continue
-    }
-
-    if (Test-Path $folder) {
-        Remove-Item $folder -Recurse -Force
-        Write-Output "Removed $folder"
-    }
-}
-
-Write-Output "Starting builds..."
-
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-# Run builds conditionally
-if ($skip -notcontains "sensor") {
-    Write-Output "Building sensor..."
-    & "$scriptDir\build_sensor.ps1"
+# Activate virtual environment if not already active
+if (-not $env:VIRTUAL_ENV) {
+    Write-Output "Activating virtual environment..."
+    & $activateScript
 } else {
-    Write-Output "Skipped sensor build"
+    Write-Output "Virtual environment is already activated."
 }
 
-if ($skip -notcontains "anchor") {
-    Write-Output "Building anchor..."
-    & "$scriptDir\build_anchor.ps1"
-} else {
-    Write-Output "Skipped anchor build"
-}
+# Set environment variables
+Set-Location -Path "c:/ncs/v3.2.3/"
+$env:BOARD_ROOT = "$CurrentDirectory"
+$env:CONF_FILE = "$CurrentDirectory/prj.conf"
+$env:NCS_TOOLCHAIN_VERSION = "v3.2.3"
+$env:PATH = "c:/ncs/toolchains/d2843cfba2/opt/bin;" + $env:PATH
 
-if ($skip -notcontains "gateway") {
-    Write-Output "Building gateway..."
-    & "$scriptDir\build_gateway.ps1"
-} else {
-    Write-Output "Skipped gateway build"
-}
+# Build unified firmware (device type is determined at runtime via GPIO pins P0.21/P0.22)
+Write-Output "Building firmware (device type selected by pins at runtime)..."
+west build --build-dir "$CurrentDirectory/build" `
+           --board nrf9151dk/nrf9151/ns `
+           --pristine `
+           --sysbuild `
+           $CurrentDirectory
 
-Write-Output "Build process completed."
+# Return to original directory
+Set-Location -Path $CurrentDirectory
