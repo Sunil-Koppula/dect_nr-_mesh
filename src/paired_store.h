@@ -30,4 +30,7 @@ int paired_store_count(const paired_store_t *ps);
 /* Print all stored entries */
 void paired_store_print(const paired_store_t *ps);
 
+/* Get device ID at NVS slot index. Returns 0 on success, -ENOENT if empty. */
+int paired_store_get(const paired_store_t *ps, int index, uint16_t *dev_id);
+
 #endif /* PAIRED_STORE_H */

@@ -123,4 +123,11 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 		    uint16_t dst_id, uint8_t file_type,
 		    const void *data, uint32_t data_len);
 
+/* Send large data from external flash (OTA staging slot).
+ * Reads fragments from flash_offset on external flash instead of RAM buffer.
+ * Returns 0 on success (ACK received with SUCCESS), negative on error */
+int large_data_send_from_flash(uint32_t tx_handle, uint32_t rx_handle,
+			       uint16_t dst_id, uint8_t file_type,
+			       uint32_t flash_offset, uint32_t data_len);
+
 #endif /* LARGE_DATA_H */

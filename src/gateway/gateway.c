@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
+#include <pm_config.h>
 #include "gateway.h"
 #include "../packet.h"
 #include "../radio.h"
@@ -272,13 +273,6 @@ void gateway_main(void)
 	ALL_INF("Gateway mode started (ID:%d, hop:0)", device_id);
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
-
-	int psram_err = psram_init();
-	if (psram_err) {
-		ALL_ERR("PSRAM init failed, err %d", psram_err);
-		return;
-	}
-	large_data_init();
 
 	while (true) {
 		int err = receive(RX_HANDLE);

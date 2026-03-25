@@ -7,6 +7,10 @@
  *     1      1       (reserved, defaults to Sensor)
  */
 / {
+	chosen {
+		nordic,pm-ext-flash = &gd25wb256;
+	};
+
 	device_type_pins {
 		compatible = "gpio-keys";
 		devtype_pin0: devtype_pin0 {

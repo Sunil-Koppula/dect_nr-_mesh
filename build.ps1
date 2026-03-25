@@ -12,10 +12,12 @@ if (-not $env:VIRTUAL_ENV) {
 
 # Set environment variables
 Set-Location -Path "c:/ncs/v3.2.3/"
-$env:BOARD_ROOT = "$CurrentDirectory"
-$env:CONF_FILE = "$CurrentDirectory/prj.conf"
 $env:NCS_TOOLCHAIN_VERSION = "v3.2.3"
 $env:PATH = "c:/ncs/toolchains/d2843cfba2/opt/bin;" + $env:PATH
+
+# Clear CONF_FILE/BOARD_ROOT so they don't leak into MCUboot child build
+Remove-Item Env:\CONF_FILE -ErrorAction SilentlyContinue
+Remove-Item Env:\BOARD_ROOT -ErrorAction SilentlyContinue
 
 # Build unified firmware (device type is determined at runtime via GPIO pins P0.21/P0.22)
 Write-Output "Building firmware (device type selected by pins at runtime)..."

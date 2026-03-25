@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/flash.h>
+#include <zephyr/devicetree.h>
 #include "large_data.h"
 #include "psram.h"
 #include "mesh.h"
@@ -917,6 +919,276 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 	}
 
 	ALL_WRN("Large data transfer failed after %d retransmit attempts",
+		RETRANSMIT_MAX);
+	return -EIO;
+}
+
+/* --- Flash-based sender: reads fragments from external flash --- */
+
+#define EXT_FLASH_NODE DT_NODELABEL(gd25wb256)
+
+static int flash_read_frag(uint32_t flash_offset, uint32_t frag_offset,
+			   void *buf, uint16_t len)
+{
+	const struct device *dev = DEVICE_DT_GET(EXT_FLASH_NODE);
+
+	return flash_read(dev, flash_offset + frag_offset, buf, len);
+}
+
+int large_data_send_from_flash(uint32_t tx_handle, uint32_t rx_handle,
+			       uint16_t dst_id, uint8_t file_type,
+			       uint32_t flash_offset, uint32_t data_len)
+{
+	if (data_len == 0 || data_len > LARGE_DATA_MAX_SIZE) {
+		return -EINVAL;
+	}
+
+	uint16_t frag_total = (data_len + LARGE_DATA_FRAG_SIZE - 1) /
+			      LARGE_DATA_FRAG_SIZE;
+	uint16_t transfer_count = frag_total - 1;
+	uint8_t last_frag_size = (uint8_t)(data_len -
+			(uint32_t)transfer_count * LARGE_DATA_FRAG_SIZE);
+
+	/* Compute CRC over flash data in chunks */
+	uint16_t crc = 0xFFFF;
+	uint8_t crc_buf[512];
+	uint32_t remaining = data_len;
+	uint32_t off = 0;
+
+	while (remaining > 0) {
+		uint16_t chunk = (remaining > sizeof(crc_buf)) ?
+				 sizeof(crc_buf) : (uint16_t)remaining;
+		int err = flash_read_frag(flash_offset, off, crc_buf, chunk);
+
+		if (err) {
+			LOG_ERR("Flash CRC read failed at 0x%x", flash_offset + off);
+			return err;
+		}
+		crc = compute_crc16_continue(crc, crc_buf, chunk);
+		off += chunk;
+		remaining -= chunk;
+	}
+
+	int err;
+
+	ALL_INF("Large data send (flash): %d bytes, %d frags, CRC:0x%04x",
+		data_len, frag_total, crc);
+
+	/* Step 1: Send INIT */
+	large_data_init_packet_t init_pkt = {
+		.packet_type = PACKET_TYPE_LARGE_DATA_INIT,
+		.src_device_id = device_id,
+		.dst_device_id = dst_id,
+		.file_type = file_type,
+		.total_size = data_len,
+		.frag_total = frag_total,
+		.last_frag_size = last_frag_size,
+		.crc16 = crc,
+	};
+
+	err = tx_with_retry(tx_handle, &init_pkt, sizeof(init_pkt));
+	if (err) {
+		return err;
+	}
+	k_sleep(K_MSEC(10));
+
+	/* Step 2: Send TRANSFER fragments (all except last) */
+	for (uint16_t i = 0; i < transfer_count; i++) {
+		uint8_t buf[DATA_LEN_MAX];
+		large_data_transfer_packet_t *t =
+			(large_data_transfer_packet_t *)buf;
+
+		t->packet_type = PACKET_TYPE_LARGE_DATA_TRANSFER;
+		t->src_device_id = device_id;
+		t->dst_device_id = dst_id;
+		t->frag_num = i;
+
+		err = flash_read_frag(flash_offset,
+				      (uint32_t)i * LARGE_DATA_FRAG_SIZE,
+				      t->payload, LARGE_DATA_FRAG_SIZE);
+		if (err) {
+			return err;
+		}
+
+		err = tx_with_retry(tx_handle, buf,
+				    LARGE_DATA_TRANSFER_PACKET_SIZE +
+				    LARGE_DATA_FRAG_SIZE);
+		if (err) {
+			return err;
+		}
+
+		if ((i + 1) % 100 == 0) {
+			LOG_INF("Sent %d/%d fragments", i + 1, frag_total);
+		}
+
+		k_sleep(K_MSEC(5));
+	}
+
+	/* Step 3: Send END (last fragment) */
+	{
+		uint8_t buf[DATA_LEN_MAX];
+		large_data_end_packet_t *e = (large_data_end_packet_t *)buf;
+
+		e->packet_type = PACKET_TYPE_LARGE_DATA_END;
+		e->src_device_id = device_id;
+		e->dst_device_id = dst_id;
+		e->frag_num = frag_total - 1;
+
+		err = flash_read_frag(flash_offset,
+				      (uint32_t)transfer_count * LARGE_DATA_FRAG_SIZE,
+				      e->payload, last_frag_size);
+		if (err) {
+			return err;
+		}
+
+		err = tx_with_retry(tx_handle, buf,
+				    LARGE_DATA_END_PACKET_SIZE + last_frag_size);
+		if (err) {
+			return err;
+		}
+	}
+
+	ALL_INF("All %d fragments sent (flash), waiting for ACK...", frag_total);
+
+	/* Step 4: Wait for ACK/NACK, retransmit on NACK */
+	for (int retransmit = 0; retransmit <= RETRANSMIT_MAX; retransmit++) {
+		err = receive_ms(rx_handle, 10000);
+		if (err) {
+			ALL_ERR("Receive for ACK failed, err %d", err);
+			return err;
+		}
+		k_sem_take(&operation_sem, K_FOREVER);
+
+		struct rx_queue_item item;
+		bool got_nack = false;
+		uint8_t nack_frag_count = 0;
+		uint16_t nack_frags[LARGE_DATA_NACK_MAX_FRAGS];
+
+		while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+			if (item.len < 1) {
+				continue;
+			}
+
+			if (item.data[0] == PACKET_TYPE_LARGE_DATA_ACK &&
+			    item.len >= LARGE_DATA_ACK_PACKET_SIZE) {
+				const large_data_ack_packet_t *ack =
+					(const large_data_ack_packet_t *)item.data;
+				if (ack->dst_device_id == device_id) {
+					if (ack->status == LARGE_DATA_ACK_SUCCESS) {
+						ALL_INF("Large data transfer (flash) SUCCESS");
+						return 0;
+					}
+					ALL_WRN("Large data transfer (flash) FAILED: CRC mismatch");
+					return -EIO;
+				}
+			}
+
+			if (item.data[0] == PACKET_TYPE_LARGE_DATA_NACK &&
+			    item.len >= LARGE_DATA_NACK_PACKET_SIZE) {
+				const large_data_nack_packet_t *nack =
+					(const large_data_nack_packet_t *)item.data;
+				if (nack->dst_device_id == device_id) {
+					nack_frag_count = nack->frag_count;
+					if (nack_frag_count > LARGE_DATA_NACK_MAX_FRAGS) {
+						nack_frag_count = LARGE_DATA_NACK_MAX_FRAGS;
+					}
+					memcpy(nack_frags, nack->frag_nums,
+					       nack_frag_count * sizeof(uint16_t));
+					got_nack = true;
+				}
+			}
+		}
+
+		if (got_nack && retransmit < RETRANSMIT_MAX) {
+			ALL_INF("NACK: %d missing frags, retransmit %d/%d",
+				nack_frag_count, retransmit + 1, RETRANSMIT_MAX);
+
+			k_sleep(K_MSEC(1000));
+
+			for (uint8_t f = 0; f < nack_frag_count; f++) {
+				uint16_t frag_num = nack_frags[f];
+
+				if (frag_num >= frag_total) {
+					continue;
+				}
+
+				uint8_t buf[DATA_LEN_MAX];
+				uint32_t frag_off = (uint32_t)frag_num * LARGE_DATA_FRAG_SIZE;
+
+				if (frag_num == frag_total - 1) {
+					large_data_end_packet_t *e =
+						(large_data_end_packet_t *)buf;
+					e->packet_type = PACKET_TYPE_LARGE_DATA_END;
+					e->src_device_id = device_id;
+					e->dst_device_id = dst_id;
+					e->frag_num = frag_num;
+					flash_read_frag(flash_offset, frag_off,
+							e->payload, last_frag_size);
+					err = tx_with_retry(tx_handle, buf,
+						    LARGE_DATA_END_PACKET_SIZE +
+						    last_frag_size);
+				} else {
+					large_data_transfer_packet_t *t =
+						(large_data_transfer_packet_t *)buf;
+					t->packet_type = PACKET_TYPE_LARGE_DATA_TRANSFER;
+					t->src_device_id = device_id;
+					t->dst_device_id = dst_id;
+					t->frag_num = frag_num;
+					flash_read_frag(flash_offset, frag_off,
+							t->payload, LARGE_DATA_FRAG_SIZE);
+					err = tx_with_retry(tx_handle, buf,
+						    LARGE_DATA_TRANSFER_PACKET_SIZE +
+						    LARGE_DATA_FRAG_SIZE);
+				}
+
+				if (err) {
+					return err;
+				}
+
+				LOG_INF("Retransmitted fragment %d", frag_num);
+				k_sleep(K_MSEC(5));
+			}
+
+			/* Re-send END if not in NACK list */
+			bool last_in_nack = false;
+
+			for (uint8_t f = 0; f < nack_frag_count; f++) {
+				if (nack_frags[f] == frag_total - 1) {
+					last_in_nack = true;
+					break;
+				}
+			}
+			if (!last_in_nack) {
+				uint8_t buf[DATA_LEN_MAX];
+				large_data_end_packet_t *e =
+					(large_data_end_packet_t *)buf;
+				e->packet_type = PACKET_TYPE_LARGE_DATA_END;
+				e->src_device_id = device_id;
+				e->dst_device_id = dst_id;
+				e->frag_num = frag_total - 1;
+				flash_read_frag(flash_offset,
+						(uint32_t)transfer_count *
+						LARGE_DATA_FRAG_SIZE,
+						e->payload, last_frag_size);
+				err = tx_with_retry(tx_handle, buf,
+					    LARGE_DATA_END_PACKET_SIZE +
+					    last_frag_size);
+				if (err) {
+					return err;
+				}
+			}
+
+			ALL_INF("Retransmission done, waiting for ACK...");
+			continue;
+		}
+
+		if (!got_nack) {
+			ALL_WRN("No ACK/NACK received for large data (flash)");
+			return -ETIMEDOUT;
+		}
+	}
+
+	ALL_WRN("Large data (flash) failed after %d retransmit attempts",
 		RETRANSMIT_MAX);
 	return -EIO;
 }

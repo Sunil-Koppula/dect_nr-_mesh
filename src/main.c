@@ -21,6 +21,10 @@
 #include "sensor/sensor.h"
 #include "display.h"
 #include "psram.h"
+#include "ota_store.h"
+#include "large_data.h"
+#include "flash_store.h"
+#include <zephyr/app_version.h>
 #include <stdio.h>
 
 LOG_MODULE_REGISTER(app);
@@ -35,11 +39,11 @@ static const struct gpio_dt_spec devtype_pin0 = GPIO_DT_SPEC_GET(DEVTYPE_PIN0_NO
 static const struct gpio_dt_spec devtype_pin1 = GPIO_DT_SPEC_GET(DEVTYPE_PIN1_NODE, gpios);
 
 /**
- * Read P0.21 and P0.22 to determine device type.
- *   P0.21=0, P0.22=0 → Gateway
- *   P0.21=0, P0.22=1 → Anchor
- *   P0.21=1, P0.22=0 → Sensor
- *   P0.21=1, P0.22=1 → Sensor (reserved)
+ * Read P0.21 and P0.23 to determine device type.
+ *   P0.21=0, P0.23=0 → Gateway
+ *   P0.21=0, P0.23=1 → Anchor
+ *   P0.21=1, P0.23=0 → Sensor
+ *   P0.21=1, P0.23=1 → Sensor (reserved)
  */
 static device_type_t device_type_read_pins(void)
 {
@@ -54,9 +58,9 @@ static device_type_t device_type_read_pins(void)
 	gpio_pin_configure_dt(&devtype_pin1, GPIO_INPUT);
 
 	bit0 = gpio_pin_get_dt(&devtype_pin0);  /* P0.21 */
-	bit1 = gpio_pin_get_dt(&devtype_pin1);  /* P0.22 */
+	bit1 = gpio_pin_get_dt(&devtype_pin1);  /* P0.23 */
 
-	LOG_INF("Device-type pins: P0.21=%d P0.22=%d", bit0, bit1);
+	LOG_INF("Device-type pins: P0.21=%d P0.23=%d", bit0, bit1);
 
 	if (bit0 == 0 && bit1 == 0) {
 		return DEVICE_TYPE_GATEWAY;
@@ -130,10 +134,11 @@ int main(void)
 		my_hop_num = 0;
 	}
 
-	LOG_INF("DECT NR+ Mesh [%s] started", device_type_str(my_device_type));
+	LOG_INF("DECT NR+ Mesh [%s] v%s started",
+		device_type_str(my_device_type), APP_VERSION_STRING);
 
-	/* PSRAM write-only test — blocks forever, remove after testing */
-	psram_test_read_write();
+	/* Confirm running image to prevent MCUboot revert */
+	ota_store_confirm_image();
 
 	/* Initialize NVS storage */
 	err = storage_init();
@@ -220,6 +225,18 @@ int main(void)
 	} else {
 		display_header(my_device_type, device_id);
 	}
+
+	/* Initialize PSRAM */
+	err = psram_init();
+	if (err) {
+		LOG_ERR("PSRAM init failed, err %d", err);
+		return err;
+	}
+	large_data_init();
+
+	/* Initialize external flash for OTA stagging */
+	flash_store_init();
+	ota_store_init();
 
 	/* Dispatch to device-type entry point */
 	switch (my_device_type) {

@@ -5,11 +5,7 @@
  * Each large data session gets a reserved region in flash.
  * Fragments are written directly to their offset within the region.
  *
- * Flash layout (1MB total, divided into LARGE_DATA_MAX_SESSIONS slots):
- *   Slot 0: 0x000000 - 0x03FFFF (256KB)
- *   Slot 1: 0x040000 - 0x07FFFF (256KB)
- *   Slot 2: 0x080000 - 0x0BFFFF (256KB)
- *   Slot 3: 0x0C0000 - 0x0FFFFF (256KB)
+ * Base address is set by Partition Manager (PM_LARGE_DATA_ADDRESS).
  */
 
 #ifndef FLASH_STORE_H
@@ -17,6 +13,11 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <pm_config.h>
+
+/* Base offset of large_data region on external flash.
+ * Placed after mcuboot_secondary (0xe8000) + ota_staging (0x80000). */
+#define FLASH_STORE_BASE_OFFSET (PM_MCUBOOT_SECONDARY_END_ADDRESS + 0x80000)
 
 /* Number of flash slots (must match LARGE_DATA_MAX_SESSIONS) */
 #define FLASH_STORE_MAX_SLOTS 4

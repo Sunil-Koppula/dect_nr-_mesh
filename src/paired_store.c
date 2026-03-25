@@ -65,6 +65,14 @@ int paired_store_count(const paired_store_t *ps)
 	return count;
 }
 
+int paired_store_get(const paired_store_t *ps, int index, uint16_t *dev_id)
+{
+	if (index < 0 || index >= ps->max_entries) {
+		return -EINVAL;
+	}
+	return storage_read(ps->nvs_base + index, dev_id, sizeof(*dev_id));
+}
+
 void paired_store_print(const paired_store_t *ps)
 {
 	uint16_t id;

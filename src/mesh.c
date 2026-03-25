@@ -89,10 +89,9 @@ int discovery_count(void)
 }
 
 /* CRC-16/CCITT (polynomial 0x1021) */
-uint16_t compute_crc16(const void *data, uint32_t len)
+uint16_t compute_crc16_continue(uint16_t crc, const void *data, uint32_t len)
 {
 	const uint8_t *p = data;
-	uint16_t crc = 0xFFFF;
 
 	for (uint32_t i = 0; i < len; i++) {
 		crc ^= (uint16_t)p[i] << 8;
@@ -105,6 +104,11 @@ uint16_t compute_crc16(const void *data, uint32_t len)
 		}
 	}
 	return crc;
+}
+
+uint16_t compute_crc16(const void *data, uint32_t len)
+{
+	return compute_crc16_continue(0xFFFF, data, len);
 }
 
 uint32_t compute_pair_hash(uint16_t dev_id, uint32_t random_num)

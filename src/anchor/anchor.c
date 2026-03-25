@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
+#include <pm_config.h>
 #include "anchor.h"
 #include "../log_all.h"
 #include "../packet.h"
@@ -526,13 +527,6 @@ void anchor_main(void)
 	}
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
-
-	int psram_err = psram_init();
-	if (psram_err) {
-		ALL_ERR("PSRAM init failed, err %d", psram_err);
-		return;
-	}
-	large_data_init();
 
 	/* RX loop — receive from children, respond and relay */
 	while (true) {

@@ -40,8 +40,8 @@ typedef enum {
 #define DATA_ACK_CRC_FAIL 0x01
 
 /* Large data file types */
-#define LARGE_DATA_FILE_DATA 0x00
-#define LARGE_DATA_FILE_OTA  0x01
+#define LARGE_DATA_FILE_DATA  0x00
+#define LARGE_DATA_FILE_OTA   0x01  /* OTA firmware image (unified, same for all devices) */
 
 /* Large data ACK status codes */
 #define LARGE_DATA_ACK_SUCCESS  0x00

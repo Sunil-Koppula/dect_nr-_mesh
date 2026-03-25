@@ -1,9 +1,8 @@
 /*
  * External flash storage for large data reassembly
  *
- * Uses the raw flash driver API on the external SPI flash (GD25WB256),
- * bypassing Partition Manager. We reserve the first 1MB (0x00000–0xFFFFF)
- * of external flash for large-data slots.
+ * Uses the raw flash driver API on the external SPI flash (GD25WB256).
+ * Base address comes from Partition Manager (PM_LARGE_DATA_ADDRESS).
  */
 
 #include <zephyr/kernel.h>
@@ -39,7 +38,8 @@ int flash_store_erase_slot(uint8_t slot)
 		return -EINVAL;
 	}
 
-	uint32_t offset = (uint32_t)slot * FLASH_STORE_SLOT_SIZE;
+	uint32_t offset = FLASH_STORE_BASE_OFFSET +
+			  (uint32_t)slot * FLASH_STORE_SLOT_SIZE;
 
 	int err = flash_erase(flash_dev, offset, FLASH_STORE_SLOT_SIZE);
 
@@ -57,7 +57,8 @@ int flash_store_write(uint8_t slot, uint32_t offset,
 		return -EINVAL;
 	}
 
-	uint32_t abs_offset = (uint32_t)slot * FLASH_STORE_SLOT_SIZE + offset;
+	uint32_t abs_offset = FLASH_STORE_BASE_OFFSET +
+			     (uint32_t)slot * FLASH_STORE_SLOT_SIZE + offset;
 
 	return flash_write(flash_dev, abs_offset, data, len);
 }
@@ -69,7 +70,8 @@ int flash_store_read(uint8_t slot, uint32_t offset,
 		return -EINVAL;
 	}
 
-	uint32_t abs_offset = (uint32_t)slot * FLASH_STORE_SLOT_SIZE + offset;
+	uint32_t abs_offset = FLASH_STORE_BASE_OFFSET +
+			     (uint32_t)slot * FLASH_STORE_SLOT_SIZE + offset;
 
 	return flash_read(flash_dev, abs_offset, buf, len);
 }
