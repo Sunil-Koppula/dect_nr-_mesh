@@ -6,6 +6,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
+#include <zephyr/app_version.h>
 #include "mesh.h"
 #include "radio.h"
 #include "state.h"
@@ -132,6 +133,9 @@ int send_pair_request(uint32_t handle, uint32_t random_num)
 		.device_type = (uint8_t)my_device_type,
 		.device_id = device_id,
 		.random_num = random_num,
+		.version_major = APP_VERSION_MAJOR,
+		.version_minor = APP_VERSION_MINOR,
+		.version_patch = APP_PATCHLEVEL,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }
@@ -157,6 +161,9 @@ int send_pair_confirm(uint32_t handle, uint16_t dst_id, uint8_t status)
 		.device_id = device_id,
 		.dst_device_id = dst_id,
 		.status = status,
+		.version_major = APP_VERSION_MAJOR,
+		.version_minor = APP_VERSION_MINOR,
+		.version_patch = APP_PATCHLEVEL,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }

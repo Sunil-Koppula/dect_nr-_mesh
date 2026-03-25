@@ -29,6 +29,8 @@ typedef enum {
 	PACKET_TYPE_LARGE_DATA_ACK      = 0x09,
 	PACKET_TYPE_LARGE_DATA_NACK     = 0x0A,
 	PACKET_TYPE_STREAM_REQUEST      = 0x0B,
+	PACKET_TYPE_OTA_INIT            = 0x0C,
+	PACKET_TYPE_OTA_ACK             = 0x0D,
 } packet_type_t;
 
 /* Pairing confirm status codes */
@@ -52,12 +54,15 @@ typedef enum {
 
 /********** Packet Structures **********/
 
-/* Pairing Request Packet (8 bytes) */
+/* Pairing Request Packet (12 bytes) */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
 	uint16_t device_id;
 	uint32_t random_num;
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
 } __attribute__((packed)) pair_request_packet_t;
 
 #define PAIR_REQUEST_PACKET_SIZE sizeof(pair_request_packet_t)
@@ -74,13 +79,16 @@ typedef struct {
 
 #define PAIR_RESPONSE_PACKET_SIZE sizeof(pair_response_packet_t)
 
-/* Pairing Confirm Packet (7 bytes) — unicast to responder */
+/* Pairing Confirm Packet (11 bytes) — unicast to responder */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
 	uint16_t device_id;         /* confirmer's ID */
 	uint16_t dst_device_id;     /* responder's ID (unicast target) */
 	uint8_t status;             /* PAIR_STATUS_SUCCESS / PAIR_STATUS_FAILURE */
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
 } __attribute__((packed)) pair_confirm_packet_t;
 
 #define PAIR_CONFIRM_PACKET_SIZE sizeof(pair_confirm_packet_t)
@@ -184,6 +192,38 @@ typedef struct {
 } __attribute__((packed)) stream_request_packet_t;
 
 #define STREAM_REQUEST_PACKET_SIZE sizeof(stream_request_packet_t)
+
+/********** OTA Update Packets **********/
+
+/* OTA ACK status codes */
+#define OTA_ACK_ACCEPT   0x00  /* Version is newer, ready to receive */
+#define OTA_ACK_REJECT   0x01  /* Version is same or older, skip */
+
+/* OTA Init — announces firmware version to target */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_OTA_INIT */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
+	uint32_t image_size;        /* total OTA image size */
+} __attribute__((packed)) ota_init_packet_t;
+
+#define OTA_INIT_PACKET_SIZE sizeof(ota_init_packet_t)
+
+/* OTA ACK — target responds with accept/reject */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_OTA_ACK */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t status;             /* OTA_ACK_ACCEPT / OTA_ACK_REJECT */
+	uint8_t version_major;      /* target's current version */
+	uint8_t version_minor;
+	uint16_t version_patch;
+} __attribute__((packed)) ota_ack_packet_t;
+
+#define OTA_ACK_PACKET_SIZE sizeof(ota_ack_packet_t)
 
 /* Get device type as string */
 static inline const char *device_type_str(device_type_t type)

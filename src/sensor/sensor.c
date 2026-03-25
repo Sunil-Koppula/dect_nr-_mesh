@@ -5,6 +5,13 @@
  *   1. Broadcast PAIR_REQUEST with a random number
  *   2. Listen for PAIR_RESPONSE(s), pick the best candidate
  *   3. Verify hash, send PAIR_CONFIRM(SUCCESS) and store identity in NVM
+ *
+ * OTA flow (sensor is always sleeping, OTA happens during data exchange):
+ *   1. Sensor wakes up, sends data to parent
+ *   2. Sensor listens for DATA_ACK — parent also sends OTA_INIT in same window
+ *   3. Sensor receives OTA_INIT, sends OTA_ACK (ACCEPT/REJECT)
+ *   4. If accepted, sensor stays awake to receive large_data OTA transfer
+ *   5. Sensor writes image to MCUboot secondary and reboots
  */
 
 #include <string.h>
@@ -20,6 +27,8 @@
 #include "../state.h"
 #include "../storage.h"
 #include "../large_data.h"
+#include "../ota.h"
+#include "../psram.h"
 #include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
@@ -163,7 +172,73 @@ static int sensor_do_pairing(void)
 	return -ETIMEDOUT;
 }
 
-/* === Data transfer: send data to parent, check for ACK === */
+/* === OTA receive loop: stay awake and receive large_data OTA image === */
+
+static void sensor_receive_ota(void)
+{
+	ALL_INF("OTA: waiting for image transfer...");
+
+	while (true) {
+		int err = receive(RX_HANDLE);
+		if (err) {
+			ALL_ERR("OTA: receive failed, err %d", err);
+			break;
+		}
+
+		bool ota_done = false;
+
+		while (true) {
+			if (k_sem_take(&operation_sem, K_MSEC(10)) == 0) {
+				break;
+			}
+			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+				nrf_modem_dect_phy_cancel(RX_HANDLE);
+				k_sem_take(&operation_sem, K_FOREVER);
+				if (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+					k_sleep(K_MSEC(50));
+				}
+				k_sem_reset(&operation_sem);
+				ota_done = true;
+				break;
+			}
+		}
+
+		large_data_process_pending_init();
+		large_data_send_pending_ack(TX_HANDLE);
+
+		/* Check if OTA image is complete */
+		uint8_t ld_slot;
+		uint32_t ld_size;
+		uint8_t ld_ft;
+		uint16_t ld_src;
+
+		if (large_data_get_completed(&ld_slot, &ld_size,
+					     &ld_ft, &ld_src)) {
+			if (ld_ft == LARGE_DATA_FILE_OTA) {
+				ALL_INF("OTA: image received (%d bytes), applying...",
+					ld_size);
+				large_data_free_completed(ld_src);
+				ota_apply_from_psram(ld_slot, ld_size);
+				/* Does not return on success */
+			}
+			large_data_free_completed(ld_src);
+		}
+
+		large_data_cleanup_stale_sessions();
+
+		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+		}
+
+		if (ota_done && !large_data_any_active_session()) {
+			ALL_WRN("OTA: transfer ended but no OTA image completed");
+			break;
+		}
+
+		k_sleep(K_MSEC(10));
+	}
+}
+
+/* === Data transfer: send data to parent, check for ACK + OTA_INIT === */
 
 static uint16_t parent_id;
 static uint32_t tx_seq;
@@ -190,7 +265,7 @@ static void sensor_send_data(void)
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
 
-	/* Listen for ACK (short window) */
+	/* Listen for ACK + possibly OTA_INIT from parent */
 	err = receive_ms(RX_HANDLE, 5000);
 	if (err) {
 		ALL_ERR("Receive failed, err %d", err);
@@ -198,33 +273,54 @@ static void sensor_send_data(void)
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
 
-	/* Drain queue and look for our ACK */
+	/* Drain queue: look for DATA_ACK and OTA_INIT */
 	struct rx_queue_item item;
 	bool acked = false;
+	bool ota_pending = false;
+	ota_init_packet_t ota_init_copy;
 
 	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
-		if (item.len < DATA_ACK_PACKET_SIZE) {
+		if (item.len < 1) {
 			continue;
 		}
-		if (item.data[0] != PACKET_TYPE_DATA_ACK) {
-			continue;
-		}
-		const data_ack_packet_t *ack =
-			(const data_ack_packet_t *)item.data;
-		if (ack->dst_device_id == device_id) {
-			if (ack->status == DATA_ACK_SUCCESS) {
-				ALL_INF("Data ACK from ID:%d: SUCCESS",
-					ack->src_device_id);
-			} else {
-				ALL_WRN("Data ACK from ID:%d: CRC FAIL",
-					ack->src_device_id);
+
+		if (item.data[0] == PACKET_TYPE_DATA_ACK &&
+		    item.len >= DATA_ACK_PACKET_SIZE) {
+			const data_ack_packet_t *ack =
+				(const data_ack_packet_t *)item.data;
+			if (ack->dst_device_id == device_id) {
+				if (ack->status == DATA_ACK_SUCCESS) {
+					ALL_INF("Data ACK from ID:%d: SUCCESS",
+						ack->src_device_id);
+				} else {
+					ALL_WRN("Data ACK from ID:%d: CRC FAIL",
+						ack->src_device_id);
+				}
+				acked = true;
 			}
-			acked = true;
+		}
+
+		if (item.data[0] == PACKET_TYPE_OTA_INIT &&
+		    item.len >= OTA_INIT_PACKET_SIZE) {
+			const ota_init_packet_t *ota_pkt =
+				(const ota_init_packet_t *)item.data;
+			if (ota_pkt->dst_device_id == device_id) {
+				memcpy(&ota_init_copy, ota_pkt, sizeof(ota_init_copy));
+				ota_pending = true;
+			}
 		}
 	}
 
 	if (!acked) {
 		ALL_WRN("No ACK received for seq:%d", payload.seq - 1);
+	}
+
+	/* Handle OTA if parent sent OTA_INIT along with the ACK */
+	if (ota_pending) {
+		bool accepted = ota_handle_init(TX_HANDLE, &ota_init_copy);
+		if (accepted) {
+			sensor_receive_ota();
+		}
 	}
 }
 

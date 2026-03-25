@@ -23,7 +23,6 @@ Remove-Item Env:\BOARD_ROOT -ErrorAction SilentlyContinue
 Write-Output "Building firmware (device type selected by pins at runtime)..."
 west build --build-dir "$CurrentDirectory/build" `
            --board nrf9151dk/nrf9151/ns `
-           --pristine `
            --sysbuild `
            $CurrentDirectory
 

@@ -25,6 +25,8 @@
 #include "../paired_store.h"
 #include "../large_data.h"
 #include "../psram.h"
+#include "../ota.h"
+#include "../ota_store.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -239,14 +241,18 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 		return;
 	}
 
-	int err = paired_store_add(store, pkt->device_id);
+	int err = paired_store_add(store, pkt->device_id,
+				   pkt->version_major, pkt->version_minor,
+				   pkt->version_patch);
 
 	if (err) {
 		ALL_ERR("Failed to store %s ID:%d, err %d",
 			store->label, pkt->device_id, err);
 	} else {
-		ALL_INF("%s ID:%d paired and stored in NVM",
-			store->label, pkt->device_id);
+		ALL_INF("%s ID:%d v%d.%d.%d paired and stored in NVM",
+			store->label, pkt->device_id,
+			pkt->version_major, pkt->version_minor,
+			pkt->version_patch);
 	}
 }
 
@@ -291,6 +297,50 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 
 	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
 		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
+
+	/* If we have a pending OTA image, check the stored version for this
+	 * device before sending. Skip if already at the staging version. */
+	if (ota_store_has_valid_image()) {
+		ota_image_header_t ota_hdr;
+		if (ota_store_read_header(&ota_hdr) == 0 &&
+		    ota_hdr.magic == OTA_HEADER_MAGIC) {
+			paired_device_info_t dev_info;
+			bool needs_ota = true;
+
+			if (paired_store_find(&sensor_store,
+					      pkt->src_device_id,
+					      &dev_info) == 0) {
+				if (dev_info.version_major == ota_hdr.version_major &&
+				    dev_info.version_minor == ota_hdr.version_minor &&
+				    dev_info.version_patch == ota_hdr.version_patch) {
+					needs_ota = false;
+				}
+			}
+
+			if (needs_ota) {
+				int ota_err = ota_send_to_device(TX_HANDLE, RX_HANDLE,
+								 pkt->src_device_id);
+				if (ota_err == 0) {
+					ALL_INF("OTA: sensor ID:%d updated",
+						pkt->src_device_id);
+					paired_store_update_version(
+						&sensor_store, pkt->src_device_id,
+						ota_hdr.version_major,
+						ota_hdr.version_minor,
+						ota_hdr.version_patch);
+				} else if (ota_err == -EALREADY) {
+					paired_store_update_version(
+						&sensor_store, pkt->src_device_id,
+						ota_hdr.version_major,
+						ota_hdr.version_minor,
+						ota_hdr.version_patch);
+				} else if (ota_err != -ENOENT) {
+					ALL_WRN("OTA: sensor ID:%d failed, err %d",
+						pkt->src_device_id, ota_err);
+				}
+			}
+		}
+	}
 
 	/* Only relay upstream if CRC was good */
 	if (status != DATA_ACK_SUCCESS) {
@@ -476,6 +526,17 @@ static void process_queue(void)
 			/* Handled by flash writer thread via ring buffer */
 			break;
 
+		case PACKET_TYPE_OTA_INIT:
+			if (item.len >= OTA_INIT_PACKET_SIZE) {
+				ota_handle_init(TX_HANDLE,
+					(const ota_init_packet_t *)item.data);
+			}
+			break;
+
+		case PACKET_TYPE_OTA_ACK:
+			/* Not applicable for anchor as receiver */
+			break;
+
 		case PACKET_TYPE_STREAM_REQUEST:
 			if (item.len >= STREAM_REQUEST_PACKET_SIZE) {
 				handle_stream_request(
@@ -528,6 +589,15 @@ void anchor_main(void)
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
+	/* On boot, if staging has a valid OTA image, distribute to children.
+	 * This handles the case where the anchor just rebooted after self-update
+	 * and needs to propagate the image to its own sensors/anchors. */
+	if (ota_store_has_valid_image()) {
+		ALL_INF("OTA: valid staging image found, distributing to children...");
+		ota_distribute_to_children(TX_HANDLE, RX_HANDLE,
+					   &anchor_store, &sensor_store);
+	}
+
 	/* RX loop — receive from children, respond and relay */
 	while (true) {
 		int err = receive(RX_HANDLE);
@@ -572,9 +642,7 @@ void anchor_main(void)
 		/* Send any pending large data ACKs */
 		large_data_send_pending_ack(TX_HANDLE);
 
-		/* Relay completed large data to parent — but only when no
-		 * sessions are actively receiving. Receiving takes priority
-		 * over relaying, since relay blocks the radio for ~18s. */
+		/* Handle completed large data sessions */
 		if (!large_data_any_active_session()) {
 			uint8_t ld_slot;
 			uint32_t ld_size;
@@ -584,6 +652,21 @@ void anchor_main(void)
 			if (large_data_get_completed(&ld_slot, &ld_size,
 						     &ld_file_type,
 						     &ld_src_id)) {
+				if (ld_file_type == LARGE_DATA_FILE_OTA) {
+					/* OTA image: stage with version info
+					 * for redistribution, then self-update
+					 * via MCUboot secondary and reboot.
+					 * After reboot, anchor_main will detect
+					 * valid staging image and distribute
+					 * to children before entering RX loop. */
+					ALL_INF("OTA: received %d bytes from ID:%d, staging and applying...",
+						ld_size, ld_src_id);
+					large_data_free_completed(ld_src_id);
+					ota_stage_and_apply(ld_slot, ld_size);
+					/* Does not return on success */
+				}
+
+				/* Non-OTA: relay to parent */
 				ALL_INF("Relaying %d bytes from ID:%d to parent ID:%d (PSRAM slot:%d)",
 					ld_size, ld_src_id, parent_id,
 					ld_slot);

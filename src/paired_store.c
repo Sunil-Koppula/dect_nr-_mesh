@@ -12,13 +12,13 @@ LOG_MODULE_DECLARE(app);
 
 static int find_slot(const paired_store_t *ps, uint16_t dev_id, bool *found)
 {
-	uint16_t stored;
+	paired_device_info_t info;
 	int first_empty = -1;
 
 	*found = false;
 	for (int i = 0; i < ps->max_entries; i++) {
-		if (storage_read(ps->nvs_base + i, &stored, sizeof(stored)) == 0) {
-			if (stored == dev_id) {
+		if (storage_read(ps->nvs_base + i, &info, sizeof(info)) == 0) {
+			if (info.device_id == dev_id) {
 				*found = true;
 				return i;
 			}
@@ -29,19 +29,34 @@ static int find_slot(const paired_store_t *ps, uint16_t dev_id, bool *found)
 	return first_empty;
 }
 
-int paired_store_add(const paired_store_t *ps, uint16_t dev_id)
+int paired_store_add(const paired_store_t *ps, uint16_t dev_id,
+		     uint8_t ver_major, uint8_t ver_minor, uint16_t ver_patch)
 {
 	bool found;
 	int slot = find_slot(ps, dev_id, &found);
 
 	if (found) {
-		return 0;
+		/* Update version if already present */
+		paired_device_info_t info = {
+			.device_id = dev_id,
+			.version_major = ver_major,
+			.version_minor = ver_minor,
+			.version_patch = ver_patch,
+		};
+		return storage_write(ps->nvs_base + slot, &info, sizeof(info));
 	}
 	if (slot < 0) {
 		LOG_WRN("%s storage full", ps->label);
 		return -ENOMEM;
 	}
-	return storage_write(ps->nvs_base + slot, &dev_id, sizeof(dev_id));
+
+	paired_device_info_t info = {
+		.device_id = dev_id,
+		.version_major = ver_major,
+		.version_minor = ver_minor,
+		.version_patch = ver_patch,
+	};
+	return storage_write(ps->nvs_base + slot, &info, sizeof(info));
 }
 
 bool paired_store_contains(const paired_store_t *ps, uint16_t dev_id)
@@ -55,10 +70,10 @@ bool paired_store_contains(const paired_store_t *ps, uint16_t dev_id)
 int paired_store_count(const paired_store_t *ps)
 {
 	int count = 0;
-	uint16_t tmp;
+	paired_device_info_t info;
 
 	for (int i = 0; i < ps->max_entries; i++) {
-		if (storage_read(ps->nvs_base + i, &tmp, sizeof(tmp)) == 0) {
+		if (storage_read(ps->nvs_base + i, &info, sizeof(info)) == 0) {
 			count++;
 		}
 	}
@@ -70,17 +85,70 @@ int paired_store_get(const paired_store_t *ps, int index, uint16_t *dev_id)
 	if (index < 0 || index >= ps->max_entries) {
 		return -EINVAL;
 	}
-	return storage_read(ps->nvs_base + index, dev_id, sizeof(*dev_id));
+	paired_device_info_t info;
+	int err = storage_read(ps->nvs_base + index, &info, sizeof(info));
+	if (err) {
+		return err;
+	}
+	*dev_id = info.device_id;
+	return 0;
+}
+
+int paired_store_get_info(const paired_store_t *ps, int index,
+			  paired_device_info_t *info)
+{
+	if (index < 0 || index >= ps->max_entries) {
+		return -EINVAL;
+	}
+	return storage_read(ps->nvs_base + index, info, sizeof(*info));
+}
+
+int paired_store_find(const paired_store_t *ps, uint16_t dev_id,
+		      paired_device_info_t *info)
+{
+	paired_device_info_t tmp;
+
+	for (int i = 0; i < ps->max_entries; i++) {
+		if (storage_read(ps->nvs_base + i, &tmp, sizeof(tmp)) == 0) {
+			if (tmp.device_id == dev_id) {
+				*info = tmp;
+				return 0;
+			}
+		}
+	}
+	return -ENOENT;
+}
+
+int paired_store_update_version(const paired_store_t *ps, uint16_t dev_id,
+				uint8_t ver_major, uint8_t ver_minor,
+				uint16_t ver_patch)
+{
+	bool found;
+	int slot = find_slot(ps, dev_id, &found);
+
+	if (!found) {
+		return -ENOENT;
+	}
+
+	paired_device_info_t info = {
+		.device_id = dev_id,
+		.version_major = ver_major,
+		.version_minor = ver_minor,
+		.version_patch = ver_patch,
+	};
+	return storage_write(ps->nvs_base + slot, &info, sizeof(info));
 }
 
 void paired_store_print(const paired_store_t *ps)
 {
-	uint16_t id;
+	paired_device_info_t info;
 
 	ALL_INF("=== Paired %ss (%d) ===", ps->label, paired_store_count(ps));
 	for (int i = 0; i < ps->max_entries; i++) {
-		if (storage_read(ps->nvs_base + i, &id, sizeof(id)) == 0) {
-			ALL_INF("  [%d] %s ID:%d", i, ps->label, id);
+		if (storage_read(ps->nvs_base + i, &info, sizeof(info)) == 0) {
+			ALL_INF("  [%d] %s ID:%d v%d.%d.%d", i, ps->label,
+				info.device_id, info.version_major,
+				info.version_minor, info.version_patch);
 		}
 	}
 }

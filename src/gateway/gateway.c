@@ -23,6 +23,8 @@
 #include "../paired_store.h"
 #include "../large_data.h"
 #include "../psram.h"
+#include "../ota.h"
+#include "../ota_store.h"
 #include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
@@ -102,14 +104,18 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 		return;
 	}
 
-	int err = paired_store_add(store, pkt->device_id);
+	int err = paired_store_add(store, pkt->device_id,
+				   pkt->version_major, pkt->version_minor,
+				   pkt->version_patch);
 
 	if (err) {
 		LOG_ERR("Failed to store %s ID:%d, err %d",
 			store->label, pkt->device_id, err);
 	} else {
-		ALL_INF("%s ID:%d paired and stored in NVM",
-			store->label, pkt->device_id);
+		ALL_INF("%s ID:%d v%d.%d.%d paired and stored in NVM",
+			store->label, pkt->device_id,
+			pkt->version_major, pkt->version_minor,
+			pkt->version_patch);
 	}
 }
 
@@ -153,6 +159,52 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 
 	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
 		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
+
+	/* If we have a pending OTA image, check the stored version for this
+	 * device before sending. Skip if already at the staging version. */
+	if (ota_store_has_valid_image()) {
+		ota_image_header_t ota_hdr;
+		if (ota_store_read_header(&ota_hdr) == 0 &&
+		    ota_hdr.magic == OTA_HEADER_MAGIC) {
+			/* Check stored version for this device */
+			paired_device_info_t dev_info;
+			bool needs_ota = true;
+
+			if (paired_store_find(&sensor_store,
+					      pkt->src_device_id,
+					      &dev_info) == 0) {
+				if (dev_info.version_major == ota_hdr.version_major &&
+				    dev_info.version_minor == ota_hdr.version_minor &&
+				    dev_info.version_patch == ota_hdr.version_patch) {
+					needs_ota = false;
+				}
+			}
+
+			if (needs_ota) {
+				int ota_err = ota_send_to_device(TX_HANDLE, RX_HANDLE,
+								 pkt->src_device_id);
+				if (ota_err == 0) {
+					ALL_INF("OTA: sensor ID:%d updated", pkt->src_device_id);
+					paired_store_update_version(
+						&sensor_store, pkt->src_device_id,
+						ota_hdr.version_major,
+						ota_hdr.version_minor,
+						ota_hdr.version_patch);
+				} else if (ota_err == -EALREADY) {
+					/* Sensor rejected — already has this version.
+					 * Update our record. */
+					paired_store_update_version(
+						&sensor_store, pkt->src_device_id,
+						ota_hdr.version_major,
+						ota_hdr.version_minor,
+						ota_hdr.version_patch);
+				} else if (ota_err != -ENOENT) {
+					ALL_WRN("OTA: sensor ID:%d failed, err %d",
+						pkt->src_device_id, ota_err);
+				}
+			}
+		}
+	}
 }
 
 
@@ -256,6 +308,8 @@ static void process_queue(void)
 		case PACKET_TYPE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_NACK:
+		case PACKET_TYPE_OTA_INIT:
+		case PACKET_TYPE_OTA_ACK:
 			/* Not applicable for gateway */
 			break;
 
@@ -271,10 +325,38 @@ static void process_queue(void)
 void gateway_main(void)
 {
 	ALL_INF("Gateway mode started (ID:%d, hop:0)", device_id);
+	ALL_INF("  Button 3: stage OTA from secondary + reboot");
+	ALL_INF("  Button 4: distribute OTA to mesh");
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
 	while (true) {
+		/* Button 3: after SMP upload, copy secondary → staging + reboot.
+		 * Must be pressed BEFORE reboot so the secondary still has
+		 * the new .signed.bin (MCUboot hasn't swapped yet). */
+		if (k_sem_take(&btn3_sem, K_NO_WAIT) == 0) {
+			int ota_err = ota_store_copy_secondary_to_staging();
+			if (ota_err == 0) {
+				ALL_INF("OTA: staging ready, rebooting to apply...");
+				k_sleep(K_MSEC(500));
+				ota_store_apply_and_reboot();
+			} else {
+				ALL_WRN("OTA: staging failed, err %d", ota_err);
+			}
+		}
+
+		/* Button 4: distribute staged OTA to mesh */
+		if (k_sem_take(&btn4_sem, K_NO_WAIT) == 0) {
+			if (ota_store_has_valid_image()) {
+				ALL_INF("OTA: distributing to children...");
+				ota_distribute_to_children(TX_HANDLE, RX_HANDLE,
+							   &anchor_store,
+							   &sensor_store);
+			} else {
+				ALL_WRN("OTA: no valid image in staging slot");
+			}
+		}
+
 		int err = receive(RX_HANDLE);
 
 		if (err) {

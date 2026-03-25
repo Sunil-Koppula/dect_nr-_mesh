@@ -25,10 +25,10 @@
 #include "packet.h"
 
 /* Max concurrent large data senders we can reassemble */
-#define LARGE_DATA_MAX_SESSIONS 32
+#define LARGE_DATA_MAX_SESSIONS 16
 
-/* Size of each session slot in PSRAM (256KB) */
-#define LARGE_DATA_SLOT_SIZE (256 * 1024)
+/* Size of each session slot in PSRAM (512KB — fits OTA images) */
+#define LARGE_DATA_SLOT_SIZE (512 * 1024)
 
 /* Max total data size we can reassemble (256KB per slot) */
 #define LARGE_DATA_MAX_SIZE LARGE_DATA_SLOT_SIZE

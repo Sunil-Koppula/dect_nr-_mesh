@@ -7,6 +7,10 @@ param(
 
 # OTA Upload Script
 # Uploads firmware to MCUboot secondary slot via MCUmgr SMP over UART.
+# After reset, MCUboot swaps the image. On boot, the gateway firmware
+# automatically populates the staging slot on external flash so it can
+# distribute the update to the mesh via Button 4.
+#
 # Requires: pip install smpclient[serial]
 #
 # Usage: ./ota_upload.ps1 -port COM36
@@ -69,8 +73,10 @@ $exitCode = $LASTEXITCODE
 Remove-Item $tempPy -ErrorAction SilentlyContinue
 
 if ($exitCode -eq 0) {
-    Write-Host "Image written to MCUboot secondary slot." -ForegroundColor Green
-    Write-Host "Reset the device to apply the update." -ForegroundColor Cyan
+    Write-Host "`nImage written to MCUboot secondary slot." -ForegroundColor Green
+    Write-Host "`n=== Next steps ===" -ForegroundColor Cyan
+    Write-Host "1. Press Button 3 on the gateway (stages OTA + reboots)" -ForegroundColor Yellow
+    Write-Host "2. After reboot, press Button 4 to distribute to mesh" -ForegroundColor Yellow
 } else {
     Write-Host "Upload failed." -ForegroundColor Red
     exit 1

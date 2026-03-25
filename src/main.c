@@ -95,13 +95,13 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 			int64_t held_ms = k_uptime_get() - btn1_press_time;
 
 			if (held_ms >= FACTORY_RESET_HOLD_MS) {
-				LOG_WRN("Factory reset! Clearing NVM...");
+				LOG_WRN("Factory reset! Clearing NVM + OTA staging...");
 				int err = storage_clear_all();
 				if (err) {
 					LOG_ERR("NVM clear failed, err %d", err);
-				} else {
-					LOG_WRN("NVM cleared. Rebooting...");
 				}
+				ota_store_erase_staging();
+				LOG_WRN("Factory reset complete. Rebooting...");
 				k_sleep(K_MSEC(500));
 				sys_reboot(SYS_REBOOT_COLD);
 			}

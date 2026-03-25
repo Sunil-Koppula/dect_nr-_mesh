@@ -66,4 +66,10 @@ int ota_store_apply_and_reboot(void);
 /* Confirm the currently running image (prevents MCUboot revert) */
 int ota_store_confirm_image(void);
 
+/* Copy the signed image from MCUboot secondary slot to the staging slot.
+ * Call BEFORE reboot after SMP upload — the secondary still has the new
+ * .signed.bin at this point. After MCUboot swaps, secondary has the old image.
+ * Reads the MCUboot image header to determine actual image size. */
+int ota_store_copy_secondary_to_staging(void);
+
 #endif /* OTA_STORE_H */

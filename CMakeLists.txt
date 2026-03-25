@@ -19,6 +19,7 @@ target_sources(app PRIVATE
   src/large_data.c
   src/flash_store.c
   src/ota_store.c
+  src/ota.c
   src/display.c
   src/gateway/gateway.c
   src/anchor/anchor.c
