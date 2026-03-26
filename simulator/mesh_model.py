@@ -264,6 +264,24 @@ class MeshNetwork:
                         n.hop = new_hop
                         changed = True
 
+    def unpair_all(self):
+        """Reset all nodes to unpaired state, keeping positions."""
+        for n in self.nodes:
+            if n.is_gateway:
+                n.paired_anchors.clear()
+                n.paired_sensors.clear()
+                n.mesh_links.clear()
+            else:
+                n.state = NodeState.IDLE
+                n.parent_id = None
+                n.hop = 0
+                n.paired_anchors.clear()
+                n.paired_sensors.clear()
+                n.mesh_links.clear()
+        self._log("All nodes unpaired")
+        if self.on_topology_changed:
+            self.on_topology_changed()
+
     # ========== Pairing Protocol ==========
 
     def _create_mesh_link(self, node_a: Node, node_b: Node):

@@ -174,13 +174,26 @@ class MainWindow(QMainWindow):
             btn_pair_all.styleSheet() +
             "QPushButton { background-color: #2a6a4a; }")
 
+        btn_unpair_all = QPushButton("Unpair All")
+        btn_unpair_all.clicked.connect(self._unpair_all)
+        btn_unpair_all.setStyleSheet(
+            btn_unpair_all.styleSheet() +
+            "QPushButton { background-color: #6a5a2a; }")
+
+        btn_randomize = QPushButton("Randomize")
+        btn_randomize.clicked.connect(self._randomize)
+        btn_randomize.setStyleSheet(
+            btn_randomize.styleSheet() +
+            "QPushButton { background-color: #2a4a6a; }")
+
         btn_clear = QPushButton("Clear All")
         btn_clear.clicked.connect(self._clear_all)
         btn_clear.setStyleSheet(
             btn_clear.styleSheet() +
             "QPushButton { background-color: #6a2a2a; }")
 
-        for btn in [btn_gw, btn_anchor, btn_sensor, btn_pair_all, btn_clear]:
+        for btn in [btn_gw, btn_anchor, btn_sensor, btn_pair_all,
+                     btn_unpair_all, btn_randomize, btn_clear]:
             toolbar_layout.addWidget(btn)
         toolbar_layout.addStretch()
 
@@ -241,6 +254,25 @@ class MainWindow(QMainWindow):
     def _pair_all(self):
         steps = self.mesh.pair_all_unpaired()
         self.canvas.queue_animation_steps(steps)
+
+    def _randomize(self):
+        import random
+        margin = 60
+        w = max(self.canvas.width() - margin * 2, 200)
+        h = max(self.canvas.height() - margin * 2, 200)
+        for node in self.mesh.nodes:
+            node.x = random.randint(margin, margin + w)
+            node.y = random.randint(margin, margin + h)
+        self.mesh._log("Randomized node positions")
+        self.canvas.update()
+        if self.canvas.selected_node:
+            self.info_panel.update_info(self.canvas.selected_node)
+
+    def _unpair_all(self):
+        self.mesh.unpair_all()
+        self.canvas.selected_node = None
+        self.info_panel.update_info(None)
+        self.canvas.update()
 
     def _clear_all(self):
         self.mesh.nodes.clear()
