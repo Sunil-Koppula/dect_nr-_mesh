@@ -45,6 +45,7 @@ static const paired_store_t sensor_store = {
 	.label = "Sensor",
 };
 
+
 /* === TX helper: transmit and wait for completion === */
 
 static int transmit_and_wait(void *data, size_t len)
@@ -322,8 +323,16 @@ static void process_queue(void)
 
 /* === Gateway entry point === */
 
+/* AT command handler paired store pointers (defined in at_cmd.c) */
+extern const void *gw_anchor_store_ptr;
+extern const void *gw_sensor_store_ptr;
+
 void gateway_main(void)
 {
+	/* Set paired store pointers for AT command handler */
+	gw_anchor_store_ptr = &anchor_store;
+	gw_sensor_store_ptr = &sensor_store;
+
 	ALL_INF("Gateway mode started (ID:%d, hop:0)", device_id);
 	ALL_INF("  Button 3: stage OTA from secondary + reboot");
 	ALL_INF("  Button 4: distribute OTA to mesh");

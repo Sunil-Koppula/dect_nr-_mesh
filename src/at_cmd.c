@@ -1,0 +1,301 @@
+/*
+ * Custom AT command handler for DECT NR+ mesh network
+ *
+ * Uses Zephyr console_getline() API in a dedicated thread.
+ * This coexists with MCUmgr SMP and logging on the same UART.
+ *
+ * Usage from serial terminal:
+ *   AT              → OK
+ *   AT+VERSION?     → +VERSION: 1.0.0
+ *   AT+INFO?        → All device info
+ *   AT+PAIR?        → List paired devices
+ *   AT+OTA_STAGE    → Stage OTA + reboot
+ *   AT+OTA_DIST     → Distribute OTA
+ *   AT+RESET        → Reboot
+ */
+
+#include <string.h>
+#include <stdio.h>
+#include <zephyr/kernel.h>
+#include <zephyr/console/console.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/app_version.h>
+#include "at_cmd.h"
+#include "state.h"
+#include "packet.h"
+#include "ota_store.h"
+#include "paired_store.h"
+#include "storage.h"
+
+/* Paired store pointers — set at runtime by gateway/anchor main.
+ * NULL on sensor (no children). */
+const void *gw_anchor_store_ptr;
+const void *gw_sensor_store_ptr;
+
+/* Thread configuration */
+#define AT_CMD_STACK_SIZE 2048
+#define AT_CMD_PRIORITY   10
+
+static K_THREAD_STACK_DEFINE(at_cmd_stack, AT_CMD_STACK_SIZE);
+static struct k_thread at_cmd_thread;
+
+/* ===== Command handlers ===== */
+
+static void at_ok(void)
+{
+	printk("OK\r\n");
+}
+
+static void cmd_version(void)
+{
+	printk("+VERSION: %d.%d.%d\r\nOK\r\n",
+	       APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_PATCHLEVEL);
+}
+
+static void cmd_devtype(void)
+{
+	printk("+DEVTYPE: %s\r\nOK\r\n", device_type_str(my_device_type));
+}
+
+static void cmd_devid(void)
+{
+	printk("+DEVID: %d\r\nOK\r\n", device_id);
+}
+
+static void cmd_hop(void)
+{
+	printk("+HOP: %d\r\nOK\r\n", my_hop_num);
+}
+
+static void cmd_rssi(void)
+{
+	printk("+RSSI: %d\r\nOK\r\n", last_rssi_dbm);
+}
+
+static void cmd_carrier(void)
+{
+	printk("+CARRIER: %d\r\nOK\r\n", CONFIG_CARRIER);
+}
+
+static void cmd_txpower(void)
+{
+	printk("+TXPOWER: %d\r\nOK\r\n", CONFIG_TX_POWER);
+}
+
+static void cmd_info(void)
+{
+	printk("+INFO:\r\n");
+	printk("  Device: %s ID:%d\r\n",
+	       device_type_str(my_device_type), device_id);
+	printk("  Version: %d.%d.%d\r\n",
+	       APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_PATCHLEVEL);
+	printk("  Hop: %d\r\n", my_hop_num);
+	printk("  Carrier: %d\r\n", CONFIG_CARRIER);
+	printk("  TX Power: %d dBm\r\n", CONFIG_TX_POWER);
+	printk("  RSSI: %d dBm\r\n", last_rssi_dbm);
+	printk("OK\r\n");
+}
+
+static void cmd_pair(void)
+{
+	if (my_device_type == DEVICE_TYPE_SENSOR) {
+		printk("+PAIR: sensor has no children\r\nOK\r\n");
+		return;
+	}
+
+	if (!gw_anchor_store_ptr || !gw_sensor_store_ptr) {
+		printk("ERROR: paired stores not available\r\n");
+		return;
+	}
+
+	const paired_store_t *a_store = gw_anchor_store_ptr;
+	const paired_store_t *s_store = gw_sensor_store_ptr;
+	paired_device_info_t info;
+
+	printk("+PAIR: Anchors\r\n");
+	for (int i = 0; i < a_store->max_entries; i++) {
+		if (paired_store_get_info(a_store, i, &info) == 0) {
+			printk("  [%d] ID:%d v%d.%d.%d\r\n", i,
+			       info.device_id, info.version_major,
+			       info.version_minor, info.version_patch);
+		}
+	}
+
+	printk("+PAIR: Sensors\r\n");
+	for (int i = 0; i < s_store->max_entries; i++) {
+		if (paired_store_get_info(s_store, i, &info) == 0) {
+			printk("  [%d] ID:%d v%d.%d.%d\r\n", i,
+			       info.device_id, info.version_major,
+			       info.version_minor, info.version_patch);
+		}
+	}
+
+	printk("OK\r\n");
+}
+
+static void cmd_ota_status(void)
+{
+	ota_image_header_t hdr;
+
+	if (ota_store_read_header(&hdr) == 0 &&
+	    hdr.magic == OTA_HEADER_MAGIC) {
+		printk("+OTA_STATUS: v%d.%d.%d, %d bytes, valid:%s\r\nOK\r\n",
+		       hdr.version_major, hdr.version_minor,
+		       hdr.version_patch, hdr.image_size,
+		       ota_store_has_valid_image() ? "yes" : "no");
+	} else {
+		printk("+OTA_STATUS: no image\r\nOK\r\n");
+	}
+}
+
+static void cmd_ota_stage(void)
+{
+	if (my_device_type != DEVICE_TYPE_GATEWAY) {
+		printk("ERROR: only gateway can stage OTA\r\n");
+		return;
+	}
+
+	int err = ota_store_copy_secondary_to_staging();
+	if (err) {
+		printk("ERROR: staging failed, err %d\r\n", err);
+		return;
+	}
+
+	printk("+OTA_STAGE: done, rebooting...\r\n");
+	k_sleep(K_MSEC(500));
+	ota_store_apply_and_reboot();
+}
+
+static void cmd_ota_dist(void)
+{
+	if (my_device_type != DEVICE_TYPE_GATEWAY &&
+	    my_device_type != DEVICE_TYPE_ANCHOR) {
+		printk("ERROR: only gateway/anchor can distribute\r\n");
+		return;
+	}
+
+	k_sem_give(&btn4_sem);
+	printk("+OTA_DIST: triggered\r\nOK\r\n");
+}
+
+static void cmd_factory_reset(void)
+{
+	printk("+FACTORY_RESET: clearing NVM + staging...\r\n");
+	storage_clear_all();
+	ota_store_erase_staging();
+	printk("+FACTORY_RESET: rebooting...\r\n");
+	k_sleep(K_MSEC(500));
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
+static void cmd_reset(void)
+{
+	printk("+RESET: rebooting...\r\n");
+	k_sleep(K_MSEC(200));
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
+static void cmd_help(void)
+{
+	printk("+HELP:\r\n");
+	printk("  AT              Test\r\n");
+	printk("  AT+VERSION?     Firmware version\r\n");
+	printk("  AT+DEVTYPE?     Device type\r\n");
+	printk("  AT+DEVID?       Device ID\r\n");
+	printk("  AT+HOP?         Hop number\r\n");
+	printk("  AT+RSSI?        Last RSSI\r\n");
+	printk("  AT+CARRIER?     Carrier freq\r\n");
+	printk("  AT+TXPOWER?     TX power\r\n");
+	printk("  AT+INFO?        All device info\r\n");
+	printk("  AT+PAIR?        Paired devices\r\n");
+	printk("  AT+OTA_STATUS?  OTA staging info\r\n");
+	printk("  AT+OTA_STAGE    Stage OTA+reboot\r\n");
+	printk("  AT+OTA_DIST     Distribute OTA\r\n");
+	printk("  AT+FACTORY_RESET  Factory reset\r\n");
+	printk("  AT+RESET        Reboot\r\n");
+	printk("  AT+HELP         This help\r\n");
+	printk("OK\r\n");
+}
+
+/* ===== Dispatch table ===== */
+
+static const struct {
+	const char *cmd;
+	void (*handler)(void);
+} at_commands[] = {
+	{ "",              at_ok },
+	{ "+VERSION?",     cmd_version },
+	{ "+DEVTYPE?",     cmd_devtype },
+	{ "+DEVID?",       cmd_devid },
+	{ "+HOP?",         cmd_hop },
+	{ "+RSSI?",        cmd_rssi },
+	{ "+CARRIER?",     cmd_carrier },
+	{ "+TXPOWER?",     cmd_txpower },
+	{ "+INFO?",        cmd_info },
+	{ "+PAIR?",        cmd_pair },
+	{ "+OTA_STATUS?",  cmd_ota_status },
+	{ "+OTA_STAGE",    cmd_ota_stage },
+	{ "+OTA_DIST",     cmd_ota_dist },
+	{ "+FACTORY_RESET", cmd_factory_reset },
+	{ "+RESET",        cmd_reset },
+	{ "+HELP",         cmd_help },
+};
+
+#define AT_CMD_COUNT (sizeof(at_commands) / sizeof(at_commands[0]))
+
+/* ===== Console getline thread ===== */
+
+static void at_cmd_thread_entry(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	console_getline_init();
+
+	while (true) {
+		char *line = console_getline();
+
+		if (!line || line[0] == '\0') {
+			continue;
+		}
+
+		/* Convert to uppercase */
+		for (int i = 0; line[i]; i++) {
+			if (line[i] >= 'a' && line[i] <= 'z') {
+				line[i] -= 32;
+			}
+		}
+
+		/* Must start with "AT" */
+		if (line[0] != 'A' || line[1] != 'T') {
+			continue;
+		}
+
+		const char *cmd_part = line + 2;
+
+		bool found = false;
+		for (int i = 0; i < AT_CMD_COUNT; i++) {
+			if (strcmp(cmd_part, at_commands[i].cmd) == 0) {
+				at_commands[i].handler();
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			printk("ERROR: unknown command\r\n");
+		}
+	}
+}
+
+/* ===== Public API ===== */
+
+void at_cmd_init(void)
+{
+	k_thread_create(&at_cmd_thread, at_cmd_stack,
+			AT_CMD_STACK_SIZE,
+			at_cmd_thread_entry, NULL, NULL, NULL,
+			AT_CMD_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&at_cmd_thread, "at_cmd");
+}

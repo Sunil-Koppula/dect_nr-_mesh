@@ -24,6 +24,7 @@
 #include "ota_store.h"
 #include "large_data.h"
 #include "flash_store.h"
+#include "at_cmd.h"
 #include <zephyr/app_version.h>
 #include <stdio.h>
 
@@ -237,6 +238,9 @@ int main(void)
 	/* Initialize external flash for OTA stagging */
 	flash_store_init();
 	ota_store_init();
+
+	/* Start AT command handler (reads from console UART) */
+	at_cmd_init();
 
 	/* Dispatch to device-type entry point */
 	switch (my_device_type) {

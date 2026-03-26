@@ -51,6 +51,7 @@ static const paired_store_t sensor_store = {
 	.label = "Sensor",
 };
 
+
 /* === Anchor identity helpers === */
 
 int anchor_store_identity(const node_identity_t *id)
@@ -558,8 +559,16 @@ static void process_queue(void)
 
 /* === Anchor entry point === */
 
+/* AT command handler paired store pointers (defined in at_cmd.c) */
+extern const void *gw_anchor_store_ptr;
+extern const void *gw_sensor_store_ptr;
+
 void anchor_main(void)
 {
+	/* Set paired store pointers for AT command handler */
+	gw_anchor_store_ptr = &anchor_store;
+	gw_sensor_store_ptr = &sensor_store;
+
 	ALL_INF("Anchor mode started (ID:%d)", device_id);
 
 	/* Check if already paired with a parent */
