@@ -14,13 +14,12 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include <pm_config.h>
-#include "anchor.h"
+#include "../state.h"
 #include "../log_all.h"
 #include "../packet.h"
 #include "../radio.h"
 #include "../queue.h"
 #include "../mesh.h"
-#include "../state.h"
 #include "../storage.h"
 #include "../paired_store.h"
 #include "../large_data.h"
@@ -40,34 +39,17 @@ static uint16_t parent_id;
 
 /* Paired device stores */
 static const paired_store_t anchor_store = {
-	.nvs_base = ANCHOR_ANCHOR_BASE,
-	.max_entries = ANCHOR_ANCHOR_MAX,
+	.nvs_base = NVS_ANCHOR_BASE,
+	.max_entries = NVS_ANCHOR_MAX,
 	.label = "Anchor",
 };
 
 static const paired_store_t sensor_store = {
-	.nvs_base = ANCHOR_SENSOR_BASE,
-	.max_entries = ANCHOR_SENSOR_MAX,
+	.nvs_base = NVS_SENSOR_BASE,
+	.max_entries = NVS_SENSOR_MAX,
 	.label = "Sensor",
 };
 
-
-/* === Anchor identity helpers === */
-
-int anchor_store_identity(const node_identity_t *id)
-{
-	return storage_write(ANCHOR_IDENTITY_KEY, id, sizeof(*id));
-}
-
-int anchor_load_identity(node_identity_t *id)
-{
-	return storage_read(ANCHOR_IDENTITY_KEY, id, sizeof(*id));
-}
-
-bool anchor_has_identity(void)
-{
-	return storage_exists(ANCHOR_IDENTITY_KEY);
-}
 
 /* === TX helper: transmit and wait for completion === */
 
@@ -176,7 +158,7 @@ static int anchor_do_pairing(void)
 			.parent_hop = best->hop_num,
 		};
 
-		err = anchor_store_identity(&identity);
+		err = node_store_identity(&identity);
 		if (err) {
 			ALL_ERR("Failed to store identity, err %d", err);
 			return err;
@@ -574,8 +556,8 @@ void anchor_main(void)
 	/* Check if already paired with a parent */
 	node_identity_t identity;
 
-	if (anchor_has_identity() &&
-	    anchor_load_identity(&identity) == 0) {
+	if (node_has_identity() &&
+	    node_load_identity(&identity) == 0) {
 		my_hop_num = identity.parent_hop + 1;
 		parent_id = identity.parent_id;
 		ALL_INF("Already paired with parent ID:%d (parent hop:%d, my hop:%d)",
@@ -590,7 +572,7 @@ void anchor_main(void)
 	}
 
 	node_identity_t self;
-	if (anchor_load_identity(&self) == 0) {
+	if (node_load_identity(&self) == 0) {
 		ALL_INF("Anchor: ID:%d parent:%d parent_hop:%d my_hop:%d",
 			self.device_id, self.parent_id, self.parent_hop,
 			self.parent_hop + 1);

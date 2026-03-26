@@ -14,7 +14,7 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include <pm_config.h>
-#include "gateway.h"
+#include "../state.h"
 #include "../packet.h"
 #include "../radio.h"
 #include "../queue.h"
@@ -34,14 +34,14 @@ LOG_MODULE_DECLARE(app);
 
 /* Paired device stores */
 static const paired_store_t anchor_store = {
-	.nvs_base = GW_ANCHOR_BASE,
-	.max_entries = GW_ANCHOR_MAX,
+	.nvs_base = NVS_ANCHOR_BASE,
+	.max_entries = NVS_ANCHOR_MAX,
 	.label = "Anchor",
 };
 
 static const paired_store_t sensor_store = {
-	.nvs_base = GW_SENSOR_BASE,
-	.max_entries = GW_SENSOR_MAX,
+	.nvs_base = NVS_SENSOR_BASE,
+	.max_entries = NVS_SENSOR_MAX,
 	.label = "Sensor",
 };
 

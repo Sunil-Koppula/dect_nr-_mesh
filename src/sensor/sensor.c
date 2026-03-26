@@ -19,12 +19,11 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
-#include "sensor.h"
+#include "../state.h"
 #include "../packet.h"
 #include "../radio.h"
 #include "../queue.h"
 #include "../mesh.h"
-#include "../state.h"
 #include "../storage.h"
 #include "../large_data.h"
 #include "../ota.h"
@@ -39,21 +38,6 @@ LOG_MODULE_DECLARE(app);
 #define PAIR_RETRY_MAX     5
 
 /* === Sensor identity helpers === */
-
-int sensor_store_identity(const node_identity_t *id)
-{
-	return storage_write(SENSOR_IDENTITY_KEY, id, sizeof(*id));
-}
-
-int sensor_load_identity(node_identity_t *id)
-{
-	return storage_read(SENSOR_IDENTITY_KEY, id, sizeof(*id));
-}
-
-bool sensor_has_identity(void)
-{
-	return storage_exists(SENSOR_IDENTITY_KEY);
-}
 
 /* === Pairing logic === */
 
@@ -155,7 +139,7 @@ static int sensor_do_pairing(void)
 			.parent_hop = best->hop_num,
 		};
 
-		err = sensor_store_identity(&identity);
+		err = node_store_identity(&identity);
 		if (err) {
 			ALL_ERR("Failed to store identity, err %d", err);
 			return err;
@@ -333,8 +317,8 @@ void sensor_main(void)
 	/* Check if already paired */
 	node_identity_t identity;
 
-	if (sensor_has_identity() &&
-	    sensor_load_identity(&identity) == 0) {
+	if (node_has_identity() &&
+	    node_load_identity(&identity) == 0) {
 		parent_id = identity.parent_id;
 		ALL_INF("Already paired with parent ID:%d (parent hop:%d)",
 			identity.parent_id, identity.parent_hop);
@@ -346,7 +330,7 @@ void sensor_main(void)
 			return;
 		}
 		/* parent_id set by sensor_do_pairing via identity store */
-		if (sensor_load_identity(&identity) == 0) {
+		if (node_load_identity(&identity) == 0) {
 			parent_id = identity.parent_id;
 		}
 	}
