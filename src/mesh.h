@@ -19,9 +19,13 @@ struct discovery_candidate {
 
 #define MAX_CANDIDATES 8
 
+/* RSSI threshold for anchor-to-anchor mesh links (dBm * 2) */
+#define MESH_RSSI_THRESHOLD_2  (-60 * 2)
+
 void discovery_reset(void);
 const struct discovery_candidate *discovery_best(void);
 int discovery_count(void);
 void discovery_add_response(const pair_response_packet_t *pkt, int16_t rssi_2);
+const struct discovery_candidate *discovery_get(int index);
 
 #endif /* MESH_H */

@@ -91,6 +91,14 @@ int discovery_count(void)
 	return candidate_count;
 }
 
+const struct discovery_candidate *discovery_get(int index)
+{
+	if (index < 0 || index >= candidate_count) {
+		return NULL;
+	}
+	return &candidates[index];
+}
+
 /* CRC-16/CCITT (polynomial 0x1021) */
 uint16_t compute_crc16_continue(uint16_t crc, const void *data, uint32_t len)
 {

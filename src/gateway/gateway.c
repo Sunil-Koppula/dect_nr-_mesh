@@ -13,7 +13,6 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
-#include <pm_config.h>
 #include "../identity.h"
 #include "../protocol.h"
 #include "../radio.h"
@@ -21,10 +20,6 @@
 #include "../mesh.h"
 #include "../mesh_tx.h"
 #include "../crc.h"
-#include "../large_data.h"
-#include "../psram.h"
-#include "../ota.h"
-#include "../ota_store.h"
 #include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
@@ -44,7 +39,6 @@ static const paired_store_t sensor_store = {
 	.max_entries = NVS_SENSOR_MAX,
 	.label = "Sensor",
 };
-
 
 /* === TX helper: transmit and wait for completion === */
 
@@ -160,100 +154,6 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 
 	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
 		status == STATUS_SUCCESS ? "OK" : "CRC_FAIL");
-
-	/* If we have a pending OTA image, check the stored version for this
-	 * device before sending. Skip if already at the staging version. */
-	if (ota_store_has_valid_image()) {
-		ota_image_header_t ota_hdr;
-		if (ota_store_read_header(&ota_hdr) == 0 &&
-		    ota_hdr.magic == OTA_HEADER_MAGIC) {
-			/* Check stored version for this device */
-			paired_device_info_t dev_info;
-			bool needs_ota = true;
-
-			if (paired_store_find(&sensor_store,
-					      pkt->src_device_id,
-					      &dev_info) == 0) {
-				if (dev_info.version_major == ota_hdr.version_major &&
-				    dev_info.version_minor == ota_hdr.version_minor &&
-				    dev_info.version_patch == ota_hdr.version_patch) {
-					needs_ota = false;
-				}
-			}
-
-			if (needs_ota) {
-				int ota_err = ota_send_to_device(TX_HANDLE, RX_HANDLE,
-								 pkt->src_device_id);
-				if (ota_err == 0) {
-					ALL_INF("OTA: sensor ID:%d updated", pkt->src_device_id);
-					paired_store_update_version(
-						&sensor_store, pkt->src_device_id,
-						ota_hdr.version_major,
-						ota_hdr.version_minor,
-						ota_hdr.version_patch);
-				} else if (ota_err == -EALREADY) {
-					/* Sensor rejected — already has this version.
-					 * Update our record. */
-					paired_store_update_version(
-						&sensor_store, pkt->src_device_id,
-						ota_hdr.version_major,
-						ota_hdr.version_minor,
-						ota_hdr.version_patch);
-				} else if (ota_err != -ENOENT) {
-					ALL_WRN("OTA: sensor ID:%d failed, err %d",
-						pkt->src_device_id, ota_err);
-				}
-			}
-		}
-	}
-}
-
-
-/* === Stream mode: send data every 500ms for 60s === */
-
-#define STREAM_DURATION_MS  60000
-#define STREAM_INTERVAL_MS  500
-
-static void handle_stream_request(const stream_request_packet_t *pkt)
-{
-	if (pkt->dst_device_id != device_id) {
-		return;
-	}
-
-	ALL_INF("Stream request from ID:%d -- streaming for 60s every 500ms",
-		pkt->src_device_id);
-
-	int64_t end_time = k_uptime_get() + STREAM_DURATION_MS;
-	uint32_t seq = 0;
-
-	while (k_uptime_get() < end_time) {
-		struct {
-			uint8_t  packet_type;
-			uint16_t src_device_id;
-			uint16_t dst_device_id;
-			uint32_t seq;
-			int64_t  timestamp_ms;
-		} __attribute__((packed)) out = {
-			.packet_type   = PACKET_TYPE_DATA,
-			.src_device_id = device_id,
-			.dst_device_id = pkt->src_device_id,
-			.seq           = seq++,
-			.timestamp_ms  = k_uptime_get(),
-		};
-
-		int err = transmit_and_wait(&out, sizeof(out));
-		if (err) {
-			ALL_WRN("Stream TX failed seq:%d err:%d", seq - 1, err);
-		} else if ((seq - 1) % 10 == 0) {
-			ALL_INF("Stream TX seq:%d to ID:%d", seq - 1,
-				pkt->src_device_id);
-		}
-
-		k_sleep(K_MSEC(STREAM_INTERVAL_MS));
-	}
-
-	ALL_INF("Stream to ID:%d complete (%d packets sent)",
-		pkt->src_device_id, seq);
 }
 
 /* === Process all queued packets (called when RX window ends) === */
@@ -293,27 +193,6 @@ static void process_queue(void)
 			}
 			break;
 
-		case PACKET_TYPE_LARGE_DATA_INIT:
-		case PACKET_TYPE_LARGE_DATA_TRANSFER:
-		case PACKET_TYPE_LARGE_DATA_END:
-			/* Handled by flash writer thread via ring buffer */
-			break;
-
-		case PACKET_TYPE_STREAM_REQUEST:
-			if (item.len >= STREAM_REQUEST_PACKET_SIZE) {
-				handle_stream_request(
-					(const stream_request_packet_t *)item.data);
-			}
-			break;
-
-		case PACKET_TYPE_DATA_ACK:
-		case PACKET_TYPE_LARGE_DATA_ACK:
-		case PACKET_TYPE_LARGE_DATA_NACK:
-		case PACKET_TYPE_OTA_INIT:
-		case PACKET_TYPE_OTA_ACK:
-			/* Not applicable for gateway */
-			break;
-
 		default:
 			break;
 		}
@@ -333,38 +212,10 @@ void gateway_main(void)
 	gw_sensor_store_ptr = &sensor_store;
 
 	ALL_INF("Gateway mode started (ID:%d, hop:0)", device_id);
-	ALL_INF("  Button 3: stage OTA from secondary + reboot");
-	ALL_INF("  Button 4: distribute OTA to mesh");
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
 	while (true) {
-		/* Button 3: after SMP upload, copy secondary → staging + reboot.
-		 * Must be pressed BEFORE reboot so the secondary still has
-		 * the new .signed.bin (MCUboot hasn't swapped yet). */
-		if (k_sem_take(&btn3_sem, K_NO_WAIT) == 0) {
-			int ota_err = ota_store_copy_secondary_to_staging();
-			if (ota_err == 0) {
-				ALL_INF("OTA: staging ready, rebooting to apply...");
-				k_sleep(K_MSEC(500));
-				ota_store_apply_and_reboot();
-			} else {
-				ALL_WRN("OTA: staging failed, err %d", ota_err);
-			}
-		}
-
-		/* Button 4: distribute staged OTA to mesh */
-		if (k_sem_take(&btn4_sem, K_NO_WAIT) == 0) {
-			if (ota_store_has_valid_image()) {
-				ALL_INF("OTA: distributing to children...");
-				ota_distribute_to_children(TX_HANDLE, RX_HANDLE,
-							   &anchor_store,
-							   &sensor_store);
-			} else {
-				ALL_WRN("OTA: no valid image in staging slot");
-			}
-		}
-
 		int err = receive_ms(RX_HANDLE, 1000);
 
 		if (err) {
@@ -373,60 +224,9 @@ void gateway_main(void)
 			continue;
 		}
 
-		/* Wait for RX window to end or large data END */
-		bool cancelled = false;
-
-		while (true) {
-			if (k_sem_take(&operation_sem, K_MSEC(10)) == 0) {
-				break;
-			}
-			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
-				nrf_modem_dect_phy_cancel(RX_HANDLE);
-				/* Cancel generates two events:
-				 * 1) EVT_CANCELED (on_cancel)
-				 * 2) EVT_COMPLETED with err 4105 (on_op_complete)
-				 * We must consume both before proceeding to TX,
-				 * otherwise the stale op_complete can be mistaken
-				 * for a TX completion in send_pending_ack.
-				 * Since operation_sem has max count 1, if both
-				 * fire before we take, one is lost. Take the
-				 * first, then wait for the second with timeout. */
-				k_sem_take(&operation_sem, K_FOREVER);
-				if (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
-					k_sleep(K_MSEC(50));
-				}
-				k_sem_reset(&operation_sem);
-				cancelled = true;
-				break;
-			}
-		}
+		k_sem_take(&operation_sem, K_FOREVER);
 
 		process_queue();
-		large_data_process_pending_init();
-		large_data_send_pending_ack(TX_HANDLE);
-
-		/* Free completed sessions (gateway is the final destination) */
-		uint8_t ld_slot;
-		uint32_t ld_size;
-		uint8_t ld_file_type;
-		uint16_t ld_src_id;
-
-		while (large_data_get_completed(&ld_slot, &ld_size,
-						&ld_file_type, &ld_src_id)) {
-			ALL_INF("Large data received: %d bytes from ID:%d type:%d (flash slot:%d)",
-				ld_size, ld_src_id, ld_file_type, ld_slot);
-			large_data_free_completed(ld_src_id);
-		}
-
-		large_data_cleanup_stale_sessions();
-
-		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
-		}
-
-		if (cancelled) {
-			k_sleep(K_MSEC(10));
-			k_sem_reset(&operation_sem);
-		}
 
 		k_sleep(K_MSEC(10));
 	}

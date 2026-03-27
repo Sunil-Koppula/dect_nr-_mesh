@@ -18,10 +18,6 @@
 #include "nvs_store.h"
 #include "identity.h"
 #include "display.h"
-#include "psram.h"
-#include "ota_store.h"
-#include "large_data.h"
-#include "flash_store.h"
 #include "at_cmd.h"
 #include <zephyr/app_version.h>
 #include <stdio.h>
@@ -94,12 +90,11 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
 			int64_t held_ms = k_uptime_get() - btn1_press_time;
 
 			if (held_ms >= FACTORY_RESET_HOLD_MS) {
-				LOG_WRN("Factory reset! Clearing NVM + OTA staging...");
+				LOG_WRN("Factory reset! Clearing NVM...");
 				int err = storage_clear_all();
 				if (err) {
 					LOG_ERR("NVM clear failed, err %d", err);
 				}
-				ota_store_erase_staging();
 				LOG_WRN("Factory reset complete. Rebooting...");
 				k_sleep(K_MSEC(500));
 				sys_reboot(SYS_REBOOT_COLD);
@@ -135,9 +130,6 @@ int main(void)
 
 	LOG_INF("DECT NR+ Mesh [%s] v%s started",
 		device_type_str(my_device_type), APP_VERSION_STRING);
-
-	/* Confirm running image to prevent MCUboot revert */
-	ota_store_confirm_image();
 
 	/* Initialize NVS storage */
 	err = storage_init();
@@ -224,18 +216,6 @@ int main(void)
 	} else {
 		display_header(my_device_type, device_id);
 	}
-
-	/* Initialize PSRAM */
-	err = psram_init();
-	if (err) {
-		LOG_ERR("PSRAM init failed, err %d", err);
-		return err;
-	}
-	large_data_init();
-
-	/* Initialize external flash for OTA stagging */
-	flash_store_init();
-	ota_store_init();
 
 	/* Start AT command handler (reads from console UART) */
 	at_cmd_init();

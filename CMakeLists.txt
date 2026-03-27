@@ -16,10 +16,7 @@ target_sources(app PRIVATE
   src/queue.c
   src/nvs_store.c
   src/identity.c
-  src/large_data.c
   src/flash_store.c
-  src/ota_store.c
-  src/ota.c
   src/at_cmd.c
   src/display.c
   src/gateway/gateway.c

@@ -23,7 +23,6 @@
 #include "at_cmd.h"
 #include "identity.h"
 #include "protocol.h"
-#include "ota_store.h"
 #include "nvs_store.h"
 
 /* Paired store pointers — set at runtime by gateway/anchor main.
@@ -132,56 +131,10 @@ static void cmd_pair(void)
 	printk("OK\r\n");
 }
 
-static void cmd_ota_status(void)
-{
-	ota_image_header_t hdr;
-
-	if (ota_store_read_header(&hdr) == 0 &&
-	    hdr.magic == OTA_HEADER_MAGIC) {
-		printk("+OTA_STATUS: v%d.%d.%d, %d bytes, valid:%s\r\nOK\r\n",
-		       hdr.version_major, hdr.version_minor,
-		       hdr.version_patch, hdr.image_size,
-		       ota_store_has_valid_image() ? "yes" : "no");
-	} else {
-		printk("+OTA_STATUS: no image\r\nOK\r\n");
-	}
-}
-
-static void cmd_ota_stage(void)
-{
-	if (my_device_type != DEVICE_TYPE_GATEWAY) {
-		printk("ERROR: only gateway can stage OTA\r\n");
-		return;
-	}
-
-	int err = ota_store_copy_secondary_to_staging();
-	if (err) {
-		printk("ERROR: staging failed, err %d\r\n", err);
-		return;
-	}
-
-	printk("+OTA_STAGE: done, rebooting...\r\n");
-	k_sleep(K_MSEC(500));
-	ota_store_apply_and_reboot();
-}
-
-static void cmd_ota_dist(void)
-{
-	if (my_device_type != DEVICE_TYPE_GATEWAY &&
-	    my_device_type != DEVICE_TYPE_ANCHOR) {
-		printk("ERROR: only gateway/anchor can distribute\r\n");
-		return;
-	}
-
-	k_sem_give(&btn4_sem);
-	printk("+OTA_DIST: triggered\r\nOK\r\n");
-}
-
 static void cmd_factory_reset(void)
 {
-	printk("+FACTORY_RESET: clearing NVM + staging...\r\n");
+	printk("+FACTORY_RESET: clearing NVM...\r\n");
 	storage_clear_all();
-	ota_store_erase_staging();
 	printk("+FACTORY_RESET: rebooting...\r\n");
 	k_sleep(K_MSEC(500));
 	sys_reboot(SYS_REBOOT_COLD);
@@ -207,9 +160,6 @@ static void cmd_help(void)
 	printk("  AT+TXPOWER?     TX power\r\n");
 	printk("  AT+INFO?        All device info\r\n");
 	printk("  AT+PAIR?        Paired devices\r\n");
-	printk("  AT+OTA_STATUS?  OTA staging info\r\n");
-	printk("  AT+OTA_STAGE    Stage OTA+reboot\r\n");
-	printk("  AT+OTA_DIST     Distribute OTA\r\n");
 	printk("  AT+FACTORY_RESET  Factory reset\r\n");
 	printk("  AT+RESET        Reboot\r\n");
 	printk("  AT+HELP         This help\r\n");
@@ -232,9 +182,6 @@ static const struct {
 	{ "+TXPOWER?",     cmd_txpower },
 	{ "+INFO?",        cmd_info },
 	{ "+PAIR?",        cmd_pair },
-	{ "+OTA_STATUS?",  cmd_ota_status },
-	{ "+OTA_STAGE",    cmd_ota_stage },
-	{ "+OTA_DIST",     cmd_ota_dist },
 	{ "+FACTORY_RESET", cmd_factory_reset },
 	{ "+RESET",        cmd_reset },
 	{ "+HELP",         cmd_help },
