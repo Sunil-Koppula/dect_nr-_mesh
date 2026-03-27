@@ -7,8 +7,7 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/nvs.h>
-#include "storage.h"
-#include "state.h"
+#include "nvs_store.h"
 
 LOG_MODULE_DECLARE(app);
 
@@ -94,23 +93,6 @@ bool storage_exists(uint16_t key)
 
 	uint8_t tmp;
 	return nvs_read(&nvs, key, &tmp, sizeof(tmp)) > 0;
-}
-
-/* === Shared identity helpers === */
-
-int node_store_identity(const node_identity_t *id)
-{
-	return storage_write(NVS_IDENTITY_KEY, id, sizeof(*id));
-}
-
-int node_load_identity(node_identity_t *id)
-{
-	return storage_read(NVS_IDENTITY_KEY, id, sizeof(*id));
-}
-
-bool node_has_identity(void)
-{
-	return storage_exists(NVS_IDENTITY_KEY);
 }
 
 int storage_clear_all(void)

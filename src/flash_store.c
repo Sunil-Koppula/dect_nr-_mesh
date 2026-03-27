@@ -2,7 +2,7 @@
  * External flash storage for large data reassembly
  *
  * Uses the raw flash driver API on the external SPI flash (GD25WB256).
- * Base address comes from Partition Manager (PM_LARGE_DATA_ADDRESS).
+ * Base address comes from Partition Manager.
  */
 
 #include <zephyr/kernel.h>

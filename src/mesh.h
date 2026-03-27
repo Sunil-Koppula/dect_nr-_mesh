@@ -1,30 +1,12 @@
 /*
- * Mesh protocol shared utilities for DECT NR+ mesh network
+ * Mesh discovery logic for DECT NR+ mesh network
  */
 
 #ifndef MESH_H
 #define MESH_H
 
 #include <stdint.h>
-#include <stddef.h>
-#include "packet.h"
-
-/* CRC16 for data integrity */
-uint16_t compute_crc16(const void *data, uint32_t len);
-uint16_t compute_crc16_continue(uint16_t crc, const void *data, uint32_t len);
-
-/* Compute pairing hash */
-uint32_t compute_pair_hash(uint16_t dev_id, uint32_t random_num);
-
-/* Random number */
-uint32_t next_random(void);
-
-/* TX helpers */
-int send_pair_request(uint32_t handle, uint32_t random_num);
-int send_pair_response(uint32_t handle, uint16_t dst_id, uint32_t hash);
-int send_pair_confirm(uint32_t handle, uint16_t dst_id, uint8_t status);
-int send_data(uint32_t handle, uint16_t dst_id, const void *payload,
-	      uint16_t payload_len);
+#include "protocol.h"
 
 /* Discovery candidate from a pair response */
 struct discovery_candidate {

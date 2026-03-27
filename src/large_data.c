@@ -25,10 +25,11 @@
 #include <zephyr/devicetree.h>
 #include "large_data.h"
 #include "psram.h"
-#include "mesh.h"
+#include "crc.h"
+#include "mesh_tx.h"
 #include "radio.h"
 #include "queue.h"
-#include "state.h"
+#include "identity.h"
 #include "display.h"
 #include "log_all.h"
 
@@ -303,7 +304,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 				ack->packet_type = PACKET_TYPE_LARGE_DATA_ACK;
 				ack->src_device_id = device_id;
 				ack->dst_device_id = pkt->src_device_id;
-				ack->status = LARGE_DATA_ACK_SUCCESS;
+				ack->status = STATUS_SUCCESS;
 				pending_responses[i].len = LARGE_DATA_ACK_PACKET_SIZE;
 				pending_responses[i].session = s;
 				pending_responses[i].free_session = false;
@@ -394,7 +395,7 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 				ack->packet_type = PACKET_TYPE_LARGE_DATA_ACK;
 				ack->src_device_id = device_id;
 				ack->dst_device_id = pkt->src_device_id;
-				ack->status = LARGE_DATA_ACK_CRC_FAIL;
+				ack->status = STATUS_CRC_FAIL;
 				pending_responses[i].len = LARGE_DATA_ACK_PACKET_SIZE;
 				pending_responses[i].session = s;
 				pending_responses[i].free_session = true;
@@ -622,7 +623,7 @@ void large_data_send_pending_ack(uint32_t tx_handle)
 					(large_data_ack_packet_t *)pending_responses[i].data;
 				ALL_INF("Large data ACK sent to ID:%d (status:%s)",
 					ack->dst_device_id,
-					ack->status == LARGE_DATA_ACK_SUCCESS ?
+					ack->status == STATUS_SUCCESS ?
 						"OK" : "CRC_FAIL");
 			} else if (pkt_type == PACKET_TYPE_LARGE_DATA_NACK) {
 				large_data_nack_packet_t *nack =
@@ -800,7 +801,7 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 				const large_data_ack_packet_t *ack =
 					(const large_data_ack_packet_t *)item.data;
 				if (ack->dst_device_id == device_id) {
-					if (ack->status == LARGE_DATA_ACK_SUCCESS) {
+					if (ack->status == STATUS_SUCCESS) {
 						ALL_INF("Large data transfer SUCCESS");
 						return 0;
 					}
@@ -1074,7 +1075,7 @@ int large_data_send_from_flash(uint32_t tx_handle, uint32_t rx_handle,
 				const large_data_ack_packet_t *ack =
 					(const large_data_ack_packet_t *)item.data;
 				if (ack->dst_device_id == device_id) {
-					if (ack->status == LARGE_DATA_ACK_SUCCESS) {
+					if (ack->status == STATUS_SUCCESS) {
 						ALL_INF("Large data transfer (flash) SUCCESS");
 						return 0;
 					}

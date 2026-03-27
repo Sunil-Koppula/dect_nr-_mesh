@@ -21,11 +21,10 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/app_version.h>
 #include "at_cmd.h"
-#include "state.h"
-#include "packet.h"
+#include "identity.h"
+#include "protocol.h"
 #include "ota_store.h"
-#include "paired_store.h"
-#include "storage.h"
+#include "nvs_store.h"
 
 /* Paired store pointers — set at runtime by gateway/anchor main.
  * NULL on sensor (no children). */

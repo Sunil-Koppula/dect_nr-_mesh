@@ -14,13 +14,13 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include <pm_config.h>
-#include "../state.h"
-#include "../packet.h"
+#include "../identity.h"
+#include "../protocol.h"
 #include "../radio.h"
 #include "../queue.h"
 #include "../mesh.h"
-#include "../state.h"
-#include "../paired_store.h"
+#include "../mesh_tx.h"
+#include "../crc.h"
 #include "../large_data.h"
 #include "../psram.h"
 #include "../ota.h"
@@ -87,9 +87,9 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 
 	ALL_INF("Pair confirm from %s ID:%d status:%s",
 		device_type_str(pkt->device_type), pkt->device_id,
-		(pkt->status == PAIR_STATUS_SUCCESS) ? "SUCCESS" : "FAILURE");
+		(pkt->status == STATUS_SUCCESS) ? "SUCCESS" : "FAILURE");
 
-	if (pkt->status != PAIR_STATUS_SUCCESS) {
+	if (pkt->status != STATUS_SUCCESS) {
 		return;
 	}
 
@@ -133,9 +133,9 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 
 	memcpy(&rx_crc, &pkt->payload[payload_len], sizeof(rx_crc));
 	uint16_t calc_crc = compute_crc16(pkt->payload, payload_len);
-	uint8_t status = (rx_crc == calc_crc) ? DATA_ACK_SUCCESS : DATA_ACK_CRC_FAIL;
+	uint8_t status = (rx_crc == calc_crc) ? STATUS_SUCCESS : STATUS_CRC_FAIL;
 
-	if (status == DATA_ACK_SUCCESS) {
+	if (status == STATUS_SUCCESS) {
 		ALL_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
 			pkt->src_device_id, payload_len, rssi_2 / 2);
 	} else {
@@ -159,7 +159,7 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 	}
 
 	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
-		status == DATA_ACK_SUCCESS ? "OK" : "CRC_FAIL");
+		status == STATUS_SUCCESS ? "OK" : "CRC_FAIL");
 
 	/* If we have a pending OTA image, check the stored version for this
 	 * device before sending. Skip if already at the staging version. */
@@ -315,7 +315,6 @@ static void process_queue(void)
 			break;
 
 		default:
-			ALL_WRN("Unknown packet type 0x%02x", pkt_type);
 			break;
 		}
 	}
@@ -366,7 +365,7 @@ void gateway_main(void)
 			}
 		}
 
-		int err = receive(RX_HANDLE);
+		int err = receive_ms(RX_HANDLE, 1000);
 
 		if (err) {
 			ALL_ERR("Receive failed, err %d", err);

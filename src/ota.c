@@ -16,12 +16,12 @@
 #include "ota.h"
 #include "ota_store.h"
 #include "large_data.h"
-#include "paired_store.h"
+#include "identity.h"
 #include "psram.h"
 #include "radio.h"
 #include "queue.h"
-#include "state.h"
-#include "mesh.h"
+#include "crc.h"
+#include "mesh_tx.h"
 #include "log_all.h"
 
 LOG_MODULE_DECLARE(app);
@@ -94,7 +94,7 @@ int ota_send_to_device(uint32_t tx_handle, uint32_t rx_handle,
 	/* Drain queue looking for OTA_ACK */
 	struct rx_queue_item item;
 	bool got_ack = false;
-	uint8_t ack_status = OTA_ACK_REJECT;
+	uint8_t ack_status = STATUS_REJECTED;
 
 	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
 		if (item.len < OTA_ACK_PACKET_SIZE) {
@@ -110,7 +110,7 @@ int ota_send_to_device(uint32_t tx_handle, uint32_t rx_handle,
 			ack_status = ack->status;
 			ALL_INF("OTA: ACK from ID:%d status:%s (running v%d.%d.%d)",
 				ack->src_device_id,
-				ack_status == OTA_ACK_ACCEPT ? "ACCEPT" : "REJECT",
+				ack_status == STATUS_SUCCESS ? "ACCEPT" : "REJECT",
 				ack->version_major, ack->version_minor,
 				ack->version_patch);
 			break;
@@ -126,7 +126,7 @@ int ota_send_to_device(uint32_t tx_handle, uint32_t rx_handle,
 		return -ETIMEDOUT;
 	}
 
-	if (ack_status == OTA_ACK_REJECT) {
+	if (ack_status == STATUS_REJECTED) {
 		ALL_INF("OTA: ID:%d rejected (same or newer version)", dst_id);
 		return -EALREADY;
 	}
@@ -276,7 +276,7 @@ bool ota_handle_init(uint32_t tx_handle, const ota_init_packet_t *pkt)
 		.packet_type = PACKET_TYPE_OTA_ACK,
 		.src_device_id = device_id,
 		.dst_device_id = pkt->src_device_id,
-		.status = accept ? OTA_ACK_ACCEPT : OTA_ACK_REJECT,
+		.status = accept ? STATUS_SUCCESS : STATUS_REJECTED,
 		.version_major = APP_VERSION_MAJOR,
 		.version_minor = APP_VERSION_MINOR,
 		.version_patch = APP_PATCHLEVEL,

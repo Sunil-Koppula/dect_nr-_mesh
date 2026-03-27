@@ -1,9 +1,9 @@
 /*
- * Packet definitions for DECT NR+ mesh network
+ * Wire protocol definitions for DECT NR+ mesh network
  */
 
-#ifndef PACKET_H
-#define PACKET_H
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
 
 #include <stdint.h>
 
@@ -33,21 +33,26 @@ typedef enum {
 	PACKET_TYPE_OTA_ACK             = 0x0D,
 } packet_type_t;
 
-/* Pairing confirm status codes */
-#define PAIR_STATUS_SUCCESS 0x00
-#define PAIR_STATUS_FAILURE 0x01
-
-/* Data ACK status codes */
-#define DATA_ACK_SUCCESS  0x00
-#define DATA_ACK_CRC_FAIL 0x01
+/* General Status Codes — unified across all packet types */
+#define STATUS_SUCCESS                  0x00
+#define STATUS_FAILURE                  0x01
+#define STATUS_CRC_FAIL                 0x02
+#define STATUS_TIMEOUT                  0x03
+#define STATUS_RESOURCE_UNAVAILABLE     0x04
+#define STATUS_INVALID_PARAMETER        0x05
+#define STATUS_NOT_SUPPORTED            0x06
+#define STATUS_REJECTED                 0x07
+#define STATUS_ALREADY_EXISTS           0x08
+#define STATUS_NOT_FOUND                0x09
+#define STATUS_BUSY                     0x0A
+#define STATUS_VERSION_MISMATCH         0x0B
+#define STATUS_TRANSFER_INCOMPLETE      0x0C
+#define STATUS_STORAGE_FULL             0x0D
+#define STATUS_VENDOR_SPECIFIC          0x1F
 
 /* Large data file types */
 #define LARGE_DATA_FILE_DATA  0x00
 #define LARGE_DATA_FILE_OTA   0x01  /* OTA firmware image (unified, same for all devices) */
-
-/* Large data ACK status codes */
-#define LARGE_DATA_ACK_SUCCESS  0x00
-#define LARGE_DATA_ACK_CRC_FAIL 0x01
 
 /* Max application data length per PHY subslot */
 #define DATA_LEN_MAX 32
@@ -85,7 +90,7 @@ typedef struct {
 	uint8_t device_type;        /* device_type_t */
 	uint16_t device_id;         /* confirmer's ID */
 	uint16_t dst_device_id;     /* responder's ID (unicast target) */
-	uint8_t status;             /* PAIR_STATUS_SUCCESS / PAIR_STATUS_FAILURE */
+	uint8_t status;             /* STATUS_SUCCESS / STATUS_FAILURE */
 	uint8_t version_major;
 	uint8_t version_minor;
 	uint16_t version_patch;
@@ -165,7 +170,7 @@ typedef struct {
 	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_ACK */
 	uint16_t src_device_id;
 	uint16_t dst_device_id;
-	uint8_t status;             /* LARGE_DATA_ACK_SUCCESS / CRC_FAIL */
+	uint8_t status;             /* STATUS_SUCCESS / STATUS_CRC_FAIL */
 } __attribute__((packed)) large_data_ack_packet_t;
 
 #define LARGE_DATA_ACK_PACKET_SIZE sizeof(large_data_ack_packet_t)
@@ -195,9 +200,9 @@ typedef struct {
 
 /********** OTA Update Packets **********/
 
-/* OTA ACK status codes */
-#define OTA_ACK_ACCEPT   0x00  /* Version is newer, ready to receive */
-#define OTA_ACK_REJECT   0x01  /* Version is same or older, skip */
+/* OTA ACK uses general status codes:
+ * STATUS_SUCCESS  — version is newer, ready to receive
+ * STATUS_REJECTED — version is same or older, skip */
 
 /* OTA Init — announces firmware version to target */
 typedef struct {
@@ -217,7 +222,7 @@ typedef struct {
 	uint8_t packet_type;        /* PACKET_TYPE_OTA_ACK */
 	uint16_t src_device_id;
 	uint16_t dst_device_id;
-	uint8_t status;             /* OTA_ACK_ACCEPT / OTA_ACK_REJECT */
+	uint8_t status;             /* STATUS_SUCCESS / STATUS_REJECTED */
 	uint8_t version_major;      /* target's current version */
 	uint8_t version_minor;
 	uint16_t version_patch;
@@ -236,4 +241,4 @@ static inline const char *device_type_str(device_type_t type)
 	}
 }
 
-#endif /* PACKET_H */
+#endif /* PROTOCOL_H */

@@ -13,10 +13,10 @@
 #include <nrf_modem_at.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <dk_buttons_and_leds.h>
-#include "packet.h"
+#include "protocol.h"
 #include "radio.h"
-#include "storage.h"
-#include "state.h"
+#include "nvs_store.h"
+#include "identity.h"
 #include "display.h"
 #include "psram.h"
 #include "ota_store.h"

@@ -16,7 +16,7 @@
 #include <pm_config.h>
 #include "ota_store.h"
 #include "psram.h"
-#include "mesh.h"
+#include "crc.h"
 
 LOG_MODULE_DECLARE(app);
 

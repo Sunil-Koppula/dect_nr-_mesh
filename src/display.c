@@ -17,7 +17,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include "display.h"
-#include "packet.h"
+#include "protocol.h"
 
 LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 

@@ -14,8 +14,8 @@ target_sources(app PRIVATE
   src/radio.c
   src/mesh.c
   src/queue.c
-  src/storage.c
-  src/paired_store.c
+  src/nvs_store.c
+  src/identity.c
   src/large_data.c
   src/flash_store.c
   src/ota_store.c

@@ -10,7 +10,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "packet.h"
+#include "protocol.h"
 
 /* Initialize UART1 for the DFR0997 display */
 int display_init(void);

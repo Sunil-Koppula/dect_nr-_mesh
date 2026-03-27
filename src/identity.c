@@ -1,14 +1,33 @@
 /*
- * Shared paired-device storage helpers for DECT NR+ mesh network
+ * Device identity and paired-device registry for DECT NR+ mesh network
  */
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include "paired_store.h"
-#include "storage.h"
+#include "identity.h"
+#include "nvs_store.h"
 #include "log_all.h"
 
 LOG_MODULE_DECLARE(app);
+
+/* ===== Node identity helpers ===== */
+
+int node_store_identity(const node_identity_t *id)
+{
+	return storage_write(NVS_IDENTITY_KEY, id, sizeof(*id));
+}
+
+int node_load_identity(node_identity_t *id)
+{
+	return storage_read(NVS_IDENTITY_KEY, id, sizeof(*id));
+}
+
+bool node_has_identity(void)
+{
+	return storage_exists(NVS_IDENTITY_KEY);
+}
+
+/* ===== Paired device registry ===== */
 
 static int find_slot(const paired_store_t *ps, uint16_t dev_id, bool *found)
 {

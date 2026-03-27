@@ -22,7 +22,7 @@
 #define OTA_H
 
 #include <stdint.h>
-#include "packet.h"
+#include "protocol.h"
 
 /* --- Sender API (gateway / anchor) --- */
 

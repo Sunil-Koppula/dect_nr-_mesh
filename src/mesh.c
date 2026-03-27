@@ -8,8 +8,10 @@
 #include <zephyr/random/random.h>
 #include <zephyr/app_version.h>
 #include "mesh.h"
+#include "mesh_tx.h"
+#include "crc.h"
 #include "radio.h"
-#include "state.h"
+#include "identity.h"
 
 LOG_MODULE_DECLARE(app);
 

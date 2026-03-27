@@ -19,12 +19,14 @@
 #include <zephyr/logging/log.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
-#include "../state.h"
-#include "../packet.h"
+#include "../identity.h"
+#include "../protocol.h"
 #include "../radio.h"
 #include "../queue.h"
 #include "../mesh.h"
-#include "../storage.h"
+#include "../mesh_tx.h"
+#include "../crc.h"
+#include "../nvs_store.h"
 #include "../large_data.h"
 #include "../ota.h"
 #include "../psram.h"
@@ -66,7 +68,7 @@ static int sensor_do_pairing(void)
 		/* Start receiving to collect pair responses */
 		discovery_reset();
 
-		err = receive(RX_HANDLE);
+		err = receive_ms(RX_HANDLE, 1000);
 		if (err) {
 			ALL_ERR("Receive failed, err %d", err);
 			k_sleep(K_SECONDS(2));
@@ -123,7 +125,7 @@ static int sensor_do_pairing(void)
 
 		/* Send pair confirm SUCCESS */
 		err = send_pair_confirm(TX_HANDLE, best->device_id,
-				       PAIR_STATUS_SUCCESS);
+				       STATUS_SUCCESS);
 		if (err) {
 			ALL_ERR("Failed to send pair confirm, err %d", err);
 			k_sleep(K_SECONDS(2));
@@ -163,7 +165,7 @@ static void sensor_receive_ota(void)
 	ALL_INF("OTA: waiting for image transfer...");
 
 	while (true) {
-		int err = receive(RX_HANDLE);
+		int err = receive_ms(RX_HANDLE, 1000);
 		if (err) {
 			ALL_ERR("OTA: receive failed, err %d", err);
 			break;
@@ -250,7 +252,7 @@ static void sensor_send_data(void)
 	k_sem_take(&operation_sem, K_FOREVER);
 
 	/* Listen for ACK + possibly OTA_INIT from parent */
-	err = receive_ms(RX_HANDLE, 5000);
+	err = receive_ms(RX_HANDLE, 1000);
 	if (err) {
 		ALL_ERR("Receive failed, err %d", err);
 		return;
@@ -273,7 +275,7 @@ static void sensor_send_data(void)
 			const data_ack_packet_t *ack =
 				(const data_ack_packet_t *)item.data;
 			if (ack->dst_device_id == device_id) {
-				if (ack->status == DATA_ACK_SUCCESS) {
+				if (ack->status == STATUS_SUCCESS) {
 					ALL_INF("Data ACK from ID:%d: SUCCESS",
 						ack->src_device_id);
 				} else {

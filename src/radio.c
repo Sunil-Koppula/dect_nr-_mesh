@@ -7,7 +7,7 @@
 #include <nrf_modem_dect_phy.h>
 #include "radio.h"
 #include "queue.h"
-#include "state.h"
+#include "identity.h"
 #include "large_data.h"
 #include "display.h"
 

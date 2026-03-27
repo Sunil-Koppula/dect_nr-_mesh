@@ -22,7 +22,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "packet.h"
+#include "protocol.h"
 
 /* Max concurrent large data senders we can reassemble */
 #define LARGE_DATA_MAX_SESSIONS 16
