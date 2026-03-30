@@ -48,12 +48,12 @@ class NodeInfoPanel(QGroupBox):
         self.lbl_state = QLabel("State: -")
         self.lbl_parent = QLabel("Parent: -")
         self.lbl_pos = QLabel("Pos: -")
-        self.lbl_anchors = QLabel("Anchors: -")
+        self.lbl_devices = QLabel("Devices: -")
         self.lbl_sensors = QLabel("Sensors: -")
 
         for lbl in [self.lbl_type, self.lbl_id, self.lbl_version,
                      self.lbl_hop, self.lbl_state, self.lbl_parent,
-                     self.lbl_pos, self.lbl_anchors, self.lbl_sensors]:
+                     self.lbl_pos, self.lbl_devices, self.lbl_sensors]:
             layout.addWidget(lbl)
 
         layout.addStretch()
@@ -63,7 +63,7 @@ class NodeInfoPanel(QGroupBox):
         if node is None:
             for lbl in [self.lbl_type, self.lbl_id, self.lbl_version,
                          self.lbl_hop, self.lbl_state, self.lbl_parent,
-                         self.lbl_pos, self.lbl_anchors, self.lbl_sensors]:
+                         self.lbl_pos, self.lbl_devices, self.lbl_sensors]:
                 lbl.setText(lbl.text().split(":")[0] + ": -")
             return
 
@@ -75,20 +75,14 @@ class NodeInfoPanel(QGroupBox):
         self.lbl_parent.setText(f"Parent: {node.parent_id or 'none'}")
         self.lbl_pos.setText(f"Pos: ({int(node.x)}, {int(node.y)})")
 
-        anchor_ids = [str(c.device_id) for c in node.paired_anchors]
-        sensor_ids = [str(c.device_id) for c in node.paired_sensors]
-        mesh_link_ids = [str(lid) for lid in node.mesh_links]
-        self.lbl_anchors.setText(
-            f"Anchors ({len(anchor_ids)}/8): "
-            + (", ".join(anchor_ids) if anchor_ids else "none"))
+        device_ids = [str(d.device_id) for d in node.paired_devices]
+        sensor_ids = [str(d.device_id) for d in node.paired_sensors]
+        self.lbl_devices.setText(
+            f"Devices ({len(device_ids)}/{8}): "
+            + (", ".join(device_ids) if device_ids else "none"))
         self.lbl_sensors.setText(
             f"Sensors ({len(sensor_ids)}/16): "
             + (", ".join(sensor_ids) if sensor_ids else "none"))
-
-        if node.is_anchor or node.is_gateway:
-            links_str = ", ".join(mesh_link_ids) if mesh_link_ids else "none"
-            self.lbl_anchors.setText(
-                f"Links ({len(mesh_link_ids)}/8): {links_str}")
 
 
 class LogPanel(QTextEdit):
@@ -186,6 +180,12 @@ class MainWindow(QMainWindow):
             btn_randomize.styleSheet() +
             "QPushButton { background-color: #2a4a6a; }")
 
+        btn_send_data = QPushButton("Send Data")
+        btn_send_data.clicked.connect(self._send_data)
+        btn_send_data.setStyleSheet(
+            btn_send_data.styleSheet() +
+            "QPushButton { background-color: #5a2a6a; }")
+
         btn_clear = QPushButton("Clear All")
         btn_clear.clicked.connect(self._clear_all)
         btn_clear.setStyleSheet(
@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
             "QPushButton { background-color: #6a2a2a; }")
 
         for btn in [btn_gw, btn_anchor, btn_sensor, btn_pair_all,
-                     btn_unpair_all, btn_randomize, btn_clear]:
+                     btn_unpair_all, btn_send_data, btn_randomize, btn_clear]:
             toolbar_layout.addWidget(btn)
         toolbar_layout.addStretch()
 
@@ -254,6 +254,26 @@ class MainWindow(QMainWindow):
     def _pair_all(self):
         steps = self.mesh.pair_all_unpaired()
         self.canvas.queue_animation_steps(steps)
+
+    def _send_data(self):
+        """Send data from all paired sensors (or selected sensor)."""
+        from mesh_model import NodeState
+        # If a sensor is selected, send from that one only
+        sel = self.canvas.selected_node
+        if sel and sel.is_sensor and sel.state == NodeState.PAIRED:
+            steps = self.mesh.simulate_data_send(sel)
+            self.canvas.queue_animation_steps(steps)
+            return
+
+        # Otherwise send from all paired sensors
+        sensors = [n for n in self.mesh.nodes
+                   if n.is_sensor and n.state == NodeState.PAIRED]
+        if not sensors:
+            self.mesh._log("No paired sensors to send data", "WRN")
+            return
+        for sensor in sensors:
+            steps = self.mesh.simulate_data_send(sensor)
+            self.canvas.queue_animation_steps(steps)
 
     def _randomize(self):
         import random

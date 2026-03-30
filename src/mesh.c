@@ -44,6 +44,9 @@ void discovery_add_response(const pair_response_packet_t *pkt, int16_t rssi_2)
 	c->hash = pkt->hash;
 	c->hop_num = pkt->hop_num;
 	c->rssi_2 = rssi_2;
+	c->version_major = pkt->version_major;
+	c->version_minor = pkt->version_minor;
+	c->version_patch = pkt->version_patch;
 }
 
 const struct discovery_candidate *discovery_best(void)
@@ -97,6 +100,144 @@ const struct discovery_candidate *discovery_get(int index)
 		return NULL;
 	}
 	return &candidates[index];
+}
+
+/*
+ * Sort candidates by mesh priority and filter:
+ *   1. Gateways and anchors with minimum hop count come first
+ *   2. Then anchors with RSSI above threshold (-75 dBm)
+ *   3. Discard anchors below RSSI threshold
+ * Returns count of valid candidates after filtering.
+ */
+int discovery_sort_mesh(void)
+{
+	if (candidate_count == 0) {
+		return 0;
+	}
+
+	/* Simple insertion sort by priority */
+	for (int i = 1; i < candidate_count; i++) {
+		struct discovery_candidate tmp = candidates[i];
+		int j = i - 1;
+
+		while (j >= 0) {
+			struct discovery_candidate *c = &candidates[j];
+			bool swap = false;
+
+			/* Gateway always ranks higher than anchor */
+			if (tmp.device_type == DEVICE_TYPE_GATEWAY &&
+			    c->device_type != DEVICE_TYPE_GATEWAY) {
+				swap = true;
+			} else if (tmp.device_type == c->device_type) {
+				/* Same type: prefer lower hop */
+				if (tmp.hop_num < c->hop_num) {
+					swap = true;
+				} else if (tmp.hop_num == c->hop_num &&
+					   tmp.rssi_2 > c->rssi_2) {
+					/* Same hop: prefer better RSSI */
+					swap = true;
+				}
+			}
+
+			if (!swap) {
+				break;
+			}
+			candidates[j + 1] = candidates[j];
+			j--;
+		}
+		candidates[j + 1] = tmp;
+	}
+
+	/* Filter out anchors below RSSI threshold */
+	int valid = 0;
+
+	for (int i = 0; i < candidate_count; i++) {
+		if (candidates[i].device_type == DEVICE_TYPE_GATEWAY) {
+			/* Gateways always kept */
+			valid++;
+		} else if (candidates[i].rssi_2 >= MESH_RSSI_THRESHOLD_2) {
+			valid++;
+		} else {
+			break; /* sorted, so remaining are worse */
+		}
+	}
+
+	candidate_count = valid;
+	return valid;
+}
+
+/* === Neighbor table === */
+
+struct mesh_neighbor neighbor_table[MAX_NEIGHBORS];
+int neighbor_count;
+
+void neighbor_reset(void)
+{
+	memset(neighbor_table, 0, sizeof(neighbor_table));
+	neighbor_count = 0;
+}
+
+int neighbor_add(uint16_t device_id, uint8_t device_type,
+		 uint8_t hop_num, int16_t rssi_2)
+{
+	/* Check if already in table — update if so */
+	for (int i = 0; i < neighbor_count; i++) {
+		if (neighbor_table[i].device_id == device_id) {
+			neighbor_table[i].hop_num = hop_num;
+			neighbor_table[i].rssi_2 = rssi_2;
+			neighbor_table[i].active = true;
+			return 0;
+		}
+	}
+
+	if (neighbor_count >= MAX_NEIGHBORS) {
+		LOG_WRN("Neighbor table full");
+		return -ENOMEM;
+	}
+
+	struct mesh_neighbor *n = &neighbor_table[neighbor_count++];
+
+	n->device_id = device_id;
+	n->device_type = device_type;
+	n->hop_num = hop_num;
+	n->rssi_2 = rssi_2;
+	n->active = true;
+
+	return 0;
+}
+
+const struct mesh_neighbor *neighbor_best_route(void)
+{
+	const struct mesh_neighbor *best = NULL;
+
+	for (int i = 0; i < neighbor_count; i++) {
+		if (!neighbor_table[i].active) {
+			continue;
+		}
+		if (best == NULL) {
+			best = &neighbor_table[i];
+			continue;
+		}
+		/* Gateway always wins */
+		if (neighbor_table[i].device_type == DEVICE_TYPE_GATEWAY &&
+		    best->device_type != DEVICE_TYPE_GATEWAY) {
+			best = &neighbor_table[i];
+			continue;
+		}
+		if (best->device_type == DEVICE_TYPE_GATEWAY &&
+		    neighbor_table[i].device_type != DEVICE_TYPE_GATEWAY) {
+			continue;
+		}
+		/* Prefer lower hop count */
+		if (neighbor_table[i].hop_num < best->hop_num) {
+			best = &neighbor_table[i];
+		} else if (neighbor_table[i].hop_num == best->hop_num &&
+			   neighbor_table[i].rssi_2 > best->rssi_2) {
+			best = &neighbor_table[i];
+		}
+	}
+
+	return best;
 }
 
 /* CRC-16/CCITT (polynomial 0x1021) */
@@ -159,6 +300,9 @@ int send_pair_response(uint32_t handle, uint16_t dst_id, uint32_t hash)
 		.dst_device_id = dst_id,
 		.hash = hash,
 		.hop_num = my_hop_num,
+		.version_major = APP_VERSION_MAJOR,
+		.version_minor = APP_VERSION_MINOR,
+		.version_patch = APP_PATCHLEVEL,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }

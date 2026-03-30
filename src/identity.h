@@ -33,12 +33,15 @@ void sensor_main(void);
 
 /* ===== Node identity (NVM) ===== */
 
-/* Node identity record — stored in NVM for anchors and sensors */
+/* Node identity record — stored in NVM for anchors and sensors.
+ * For mesh anchors: min_hop is the lowest hop among neighbors (my_hop = min_hop + 1).
+ * For sensors: parent_id/parent_hop still used for tree-style uplink.
+ */
 typedef struct {
 	uint16_t device_id;
 	uint8_t device_type;
-	uint16_t parent_id;
-	uint8_t parent_hop;
+	uint16_t parent_id;     /* sensors: parent ID; anchors: best-route neighbor ID */
+	uint8_t parent_hop;     /* sensors: parent hop; anchors: min hop among neighbors */
 } __attribute__((packed)) node_identity_t;
 
 /*

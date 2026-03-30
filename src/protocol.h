@@ -72,7 +72,7 @@ typedef struct {
 
 #define PAIR_REQUEST_PACKET_SIZE sizeof(pair_request_packet_t)
 
-/* Pairing Response Packet (11 bytes) — unicast to requester */
+/* Pairing Response Packet (15 bytes) — unicast to requester */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
@@ -80,6 +80,9 @@ typedef struct {
 	uint16_t dst_device_id;     /* requester's ID (unicast target) */
 	uint32_t hash;
 	uint8_t hop_num;
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
 } __attribute__((packed)) pair_response_packet_t;
 
 #define PAIR_RESPONSE_PACKET_SIZE sizeof(pair_response_packet_t)
