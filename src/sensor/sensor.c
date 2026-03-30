@@ -19,6 +19,7 @@
 #include "../mesh.h"
 #include "../mesh_tx.h"
 #include "../crc.h"
+#include "../large_data.h"
 #include "../nvs_store.h"
 #include "../log_all.h"
 
@@ -141,6 +142,7 @@ static int sensor_do_pairing(void)
 
 static uint16_t parent_id;
 static uint32_t tx_seq;
+static uint8_t large_data_send_count;
 
 static void sensor_send_data(void)
 {
@@ -227,10 +229,45 @@ void sensor_main(void)
 
 	ALL_INF("Sensor ready:");
 	ALL_INF("  Button 2: send small data");
+	ALL_INF("  Button 3: send 50KB large data");
 
 	while (true) {
 		if (k_sem_take(&btn2_sem, K_MSEC(50)) == 0) {
 			sensor_send_data();
+			continue;
+		}
+
+		if (k_sem_take(&btn3_sem, K_MSEC(50)) == 0) {
+			uint32_t size = 50 * 1024;
+			uint8_t *buf = k_malloc(size);
+
+			if (!buf) {
+				ALL_ERR("Failed to allocate %d bytes", size);
+				continue;
+			}
+
+			/* Sequential test pattern with varying start byte */
+			uint8_t start = large_data_send_count;
+
+			for (uint32_t i = 0; i < size; i++) {
+				buf[i] = (uint8_t)(start + i);
+			}
+
+			ALL_INF("Sending %dKB (start:0x%02x) to parent ID:%d",
+				size / 1024, start, parent_id);
+
+			int err = large_data_send(TX_HANDLE, RX_HANDLE,
+						  parent_id,
+						  LARGE_DATA_FILE_DATA,
+						  buf, size);
+
+			k_free(buf);
+
+			if (err) {
+				ALL_ERR("Large data send failed, err %d", err);
+			}
+
+			large_data_send_count++;
 			continue;
 		}
 	}

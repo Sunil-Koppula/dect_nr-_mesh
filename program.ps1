@@ -9,6 +9,8 @@ $boards = @{
     "2" = "1052050495"
     "3" = "1052071448"
     "4" = "1052009857"
+    "5" = "1052043198"
+    "6" = "1052086602"
 }
 
 $modem_firmware = "c:\ncs\mfw-nr+-phy_nrf91x1_2.0.0.zip"
@@ -29,11 +31,13 @@ if ($board -eq "all") {
     $targets = @($board)
 } else {
     Write-Host "Invalid board: $board" -ForegroundColor Red
-    Write-Host "Usage: ./program.ps1 <1|2|3|4|all>" -ForegroundColor Yellow
+    Write-Host "Usage: ./program.ps1 <1|2|3|4|5|6|all>" -ForegroundColor Yellow
     Write-Host "  1 = SN $($boards['1'])" -ForegroundColor Gray
     Write-Host "  2 = SN $($boards['2'])" -ForegroundColor Gray
     Write-Host "  3 = SN $($boards['3'])" -ForegroundColor Gray
     Write-Host "  4 = SN $($boards['4'])" -ForegroundColor Gray
+    Write-Host "  5 = SN $($boards['5'])" -ForegroundColor Gray
+    Write-Host "  6 = SN $($boards['6'])" -ForegroundColor Gray
     exit 1
 }
 
@@ -44,8 +48,8 @@ foreach ($t in $targets) {
     Write-Host "`n=== Flashing firmware to Board $t (SN: $sn) ===" -ForegroundColor Cyan
 
     # # Upgrade Modem Firmware (uncomment to use)
-    # Write-Host "Programming Modem Firmware..." -ForegroundColor Yellow
-    # nrfutil 91 modem-firmware-upgrade --firmware $modem_firmware --serial-number $sn
+    Write-Host "Programming Modem Firmware..." -ForegroundColor Yellow
+    nrfutil 91 modem-firmware-upgrade --firmware $modem_firmware --serial-number $sn
 
     Write-Host "Flashing $app_hex..." -ForegroundColor Green
     nrfjprog --program $app_hex --chiperase --verify -s $sn

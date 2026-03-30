@@ -26,6 +26,8 @@
 #include "../mesh.h"
 #include "../mesh_tx.h"
 #include "../crc.h"
+#include "../large_data.h"
+#include "../psram.h"
 #include "../nvs_store.h"
 
 LOG_MODULE_DECLARE(app);
@@ -439,6 +441,17 @@ static void process_queue(void)
 			}
 			break;
 
+		case PACKET_TYPE_LARGE_DATA_INIT:
+		case PACKET_TYPE_LARGE_DATA_TRANSFER:
+		case PACKET_TYPE_LARGE_DATA_END:
+			/* Handled by PSRAM writer thread via ring buffer */
+			break;
+
+		case PACKET_TYPE_LARGE_DATA_ACK:
+		case PACKET_TYPE_LARGE_DATA_NACK:
+			/* Handled during large_data_send() own RX loop */
+			break;
+
 		default:
 			break;
 		}
@@ -598,8 +611,8 @@ void anchor_main(void)
 	paired_store_print(&device_store);
 	paired_store_print(&sensor_store);
 
-	/* RX loop — receive from neighbors, respond and relay.
-	 * Periodically re-discover new neighbors until device store is full.
+	/* RX loop — receive from neighbors, respond, relay, and handle
+	 * large data transfers. Periodically re-discover new neighbors.
 	 */
 	int64_t last_rediscovery = k_uptime_get();
 
@@ -611,9 +624,109 @@ void anchor_main(void)
 			continue;
 		}
 
-		k_sem_take(&operation_sem, K_FOREVER);
+		/* Wait for RX window to end, or break early if large data
+		 * END arrives (need to send ACK promptly) */
+		bool cancelled = false;
+
+		while (true) {
+			if (k_sem_take(&operation_sem, K_MSEC(10)) == 0) {
+				break;
+			}
+			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+				nrf_modem_dect_phy_cancel(RX_HANDLE);
+				k_sem_take(&operation_sem, K_FOREVER);
+				if (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+					k_sleep(K_MSEC(50));
+				}
+				k_sem_reset(&operation_sem);
+				cancelled = true;
+				break;
+			}
+		}
 
 		process_queue();
+		large_data_send_pending_ack(TX_HANDLE);
+
+		/* Relay completed large data to best-route neighbor
+		 * (single route, NOT mesh flood — too expensive for large data) */
+		if (!large_data_any_active_session()) {
+			uint8_t ld_slot;
+			uint32_t ld_size;
+			uint8_t ld_file_type;
+			uint16_t ld_src_id;
+
+			if (large_data_get_completed(&ld_slot, &ld_size,
+						     &ld_file_type,
+						     &ld_src_id)) {
+				const struct mesh_neighbor *best =
+					neighbor_best_route();
+
+				if (!best) {
+					ALL_ERR("No route for large data relay");
+					large_data_free_completed(ld_src_id);
+				} else {
+					ALL_INF("Relaying %d bytes from ID:%d "
+						"to best-route ID:%d",
+						ld_size, ld_src_id,
+						best->device_id);
+
+					uint8_t *relay_buf = k_malloc(ld_size);
+
+					if (!relay_buf) {
+						ALL_ERR("Failed to alloc %d "
+							"bytes for relay",
+							ld_size);
+						large_data_free_completed(
+							ld_src_id);
+					} else {
+						uint32_t addr =
+							(uint32_t)ld_slot *
+							LARGE_DATA_SLOT_SIZE;
+						int rerr = psram_read(
+							addr, relay_buf,
+							ld_size);
+
+						if (rerr) {
+							ALL_ERR("PSRAM read "
+								"failed, err %d",
+								rerr);
+						} else {
+							rerr = large_data_send(
+								TX_HANDLE,
+								RX_HANDLE,
+								best->device_id,
+								ld_file_type,
+								relay_buf,
+								ld_size);
+							if (rerr) {
+								ALL_ERR("Relay "
+									"failed, "
+									"err %d",
+									rerr);
+							} else {
+								ALL_INF("Large "
+									"data "
+									"relay OK");
+							}
+						}
+						k_free(relay_buf);
+						large_data_free_completed(
+							ld_src_id);
+					}
+				}
+			}
+		}
+
+		large_data_cleanup_stale_sessions();
+
+		/* Drain extra end_sem gives */
+		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+		}
+
+		if (cancelled) {
+			k_sleep(K_MSEC(10));
+			k_sem_reset(&operation_sem);
+		}
 
 		/* Periodic rediscovery every 10 minutes */
 		if (paired_store_count(&device_store) < device_store.max_entries &&

@@ -1,11 +1,13 @@
 """
 Packet definitions for DECT NR+ mesh network simulator.
-Mirrors the C packet.h structures.
+Mirrors src/protocol.h exactly.
 """
 
 from dataclasses import dataclass
 from enum import IntEnum
 
+
+# === Device Type (mirrors device_type_t) ===
 
 class DeviceType(IntEnum):
     UNKNOWN = 0x00
@@ -14,20 +16,24 @@ class DeviceType(IntEnum):
     SENSOR = 0x03
 
 
+# === Packet Types (mirrors packet_type_t) ===
+
 class PacketType(IntEnum):
     PAIR_REQUEST = 0x01
     PAIR_RESPONSE = 0x02
     PAIR_CONFIRM = 0x03
     DATA = 0x04
     DATA_ACK = 0x05
-    OTA_INIT = 0x0C
-    OTA_ACK = 0x0D
 
 
-# Pairing status codes
-PAIR_STATUS_SUCCESS = 0x00
-PAIR_STATUS_FAILURE = 0x01
+# === Status Codes (mirrors STATUS_*) ===
 
+STATUS_SUCCESS = 0x00
+STATUS_FAILURE = 0x01
+STATUS_CRC_FAIL = 0x02
+
+
+# === Version ===
 
 @dataclass
 class Version:
@@ -38,13 +44,8 @@ class Version:
     def __str__(self):
         return f"{self.major}.{self.minor}.{self.patch}"
 
-    def is_newer_than(self, other: "Version") -> bool:
-        if self.major != other.major:
-            return self.major > other.major
-        if self.minor != other.minor:
-            return self.minor > other.minor
-        return self.patch > other.patch
 
+# === Pair Request (mirrors pair_request_packet_t — 12 bytes) ===
 
 @dataclass
 class PairRequest:
@@ -59,35 +60,65 @@ class PairRequest:
             self.version = Version()
 
 
+# === Pair Response (mirrors pair_response_packet_t — 15 bytes) ===
+
 @dataclass
 class PairResponse:
     packet_type: int = PacketType.PAIR_RESPONSE
     device_type: int = DeviceType.UNKNOWN
-    device_id: int = 0
-    dst_device_id: int = 0
+    device_id: int = 0          # responder's ID
+    dst_device_id: int = 0      # requester's ID
     hash: int = 0
     hop_num: int = 0
-
-
-@dataclass
-class PairConfirm:
-    packet_type: int = PacketType.PAIR_CONFIRM
-    device_type: int = DeviceType.UNKNOWN
-    device_id: int = 0
-    dst_device_id: int = 0
-    status: int = PAIR_STATUS_SUCCESS
-    version: Version = None
+    version: Version = None     # responder's version
 
     def __post_init__(self):
         if self.version is None:
             self.version = Version()
 
 
+# === Pair Confirm (mirrors pair_confirm_packet_t — 11 bytes) ===
+
+@dataclass
+class PairConfirm:
+    packet_type: int = PacketType.PAIR_CONFIRM
+    device_type: int = DeviceType.UNKNOWN
+    device_id: int = 0          # confirmer's ID
+    dst_device_id: int = 0      # responder's ID
+    status: int = STATUS_SUCCESS
+    version: Version = None     # confirmer's version
+
+    def __post_init__(self):
+        if self.version is None:
+            self.version = Version()
+
+
+# === Data Packet (mirrors data_packet_t) ===
+
+@dataclass
+class DataPacket:
+    packet_type: int = PacketType.DATA
+    src_device_id: int = 0
+    dst_device_id: int = 0
+    payload_len: int = 0
+
+
+# === Data ACK (mirrors data_ack_packet_t — 7 bytes) ===
+
+@dataclass
+class DataAck:
+    packet_type: int = PacketType.DATA_ACK
+    src_device_id: int = 0
+    dst_device_id: int = 0
+    hop_num: int = 0
+    status: int = STATUS_SUCCESS
+
+
+# === Hash (mirrors compute_pair_hash in mesh.c) ===
+
 def compute_pair_hash(device_id: int, random_num: int) -> int:
-    """Simple hash for pairing verification."""
     h = device_id ^ random_num
-    h = ((h << 13) ^ h) & 0xFFFFFFFF
-    h = (h * 0x5BD1E995) & 0xFFFFFFFF
+    h = (((h << 13) | (h >> 19)) ^ (h * 0x5BD1E995)) & 0xFFFFFFFF
     return h
 
 

@@ -8,6 +8,7 @@
 #include "radio.h"
 #include "queue.h"
 #include "identity.h"
+#include "large_data.h"
 #include "display.h"
 
 LOG_MODULE_DECLARE(app);
@@ -125,6 +126,49 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 
 	memcpy(local_buf, evt->data, copy_len);
 
+	uint8_t pkt_type = local_buf[0];
+
+	/*
+	 * Large data packets (INIT, TRANSFER, END) are queued to a ring
+	 * buffer and processed by a dedicated PSRAM writer thread.
+	 * SPI PSRAM writes are NOT ISR-safe (they use mutexes/sleep).
+	 * INIT must be in the same ring so it's processed before TRANSFER
+	 * fragments that follow it.
+	 */
+	if (pkt_type == PACKET_TYPE_LARGE_DATA_INIT &&
+	    copy_len >= LARGE_DATA_INIT_PACKET_SIZE) {
+		const large_data_init_packet_t *init =
+			(const large_data_init_packet_t *)local_buf;
+		if (init->dst_device_id != device_id) {
+			goto normal_rx;
+		}
+		large_data_handle_init(init);
+		return;
+	}
+
+	if (pkt_type == PACKET_TYPE_LARGE_DATA_TRANSFER &&
+	    copy_len >= LARGE_DATA_TRANSFER_PACKET_SIZE) {
+		const large_data_transfer_packet_t *xfer =
+			(const large_data_transfer_packet_t *)local_buf;
+		if (xfer->dst_device_id != device_id) {
+			goto normal_rx;
+		}
+		large_data_handle_transfer(xfer, copy_len);
+		return;
+	}
+
+	if (pkt_type == PACKET_TYPE_LARGE_DATA_END &&
+	    copy_len >= LARGE_DATA_END_PACKET_SIZE) {
+		const large_data_end_packet_t *end =
+			(const large_data_end_packet_t *)local_buf;
+		if (end->dst_device_id != device_id) {
+			goto normal_rx;
+		}
+		large_data_handle_end(end, copy_len);
+		return;
+	}
+
+normal_rx:
 	last_rssi_dbm = evt->rssi_2 / 2;
 	display_update_rssi(last_rssi_dbm);
 	rx_queue_put(evt->data, evt->len, evt->rssi_2);

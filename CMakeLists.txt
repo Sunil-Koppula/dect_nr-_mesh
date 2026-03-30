@@ -23,4 +23,5 @@ target_sources(app PRIVATE
   src/anchor/anchor.c
   src/sensor/sensor.c
   src/psram.c
+  src/large_data.c
 )

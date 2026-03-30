@@ -20,6 +20,8 @@
 #include "../mesh.h"
 #include "../mesh_tx.h"
 #include "../crc.h"
+#include "../large_data.h"
+#include "../psram.h"
 #include "../log_all.h"
 
 LOG_MODULE_DECLARE(app);
@@ -193,6 +195,17 @@ static void process_queue(void)
 			}
 			break;
 
+		case PACKET_TYPE_LARGE_DATA_INIT:
+		case PACKET_TYPE_LARGE_DATA_TRANSFER:
+		case PACKET_TYPE_LARGE_DATA_END:
+			/* Handled by PSRAM writer thread via ring buffer */
+			break;
+
+		case PACKET_TYPE_LARGE_DATA_ACK:
+		case PACKET_TYPE_LARGE_DATA_NACK:
+			/* Not applicable for gateway */
+			break;
+
 		default:
 			break;
 		}
@@ -224,9 +237,53 @@ void gateway_main(void)
 			continue;
 		}
 
-		k_sem_take(&operation_sem, K_FOREVER);
+		/* Wait for RX window to end, or break early if large data
+		 * END arrives (need to send ACK promptly) */
+		bool cancelled = false;
+
+		while (true) {
+			if (k_sem_take(&operation_sem, K_MSEC(10)) == 0) {
+				break;
+			}
+			if (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+				nrf_modem_dect_phy_cancel(RX_HANDLE);
+				k_sem_take(&operation_sem, K_FOREVER);
+				if (k_sem_take(&operation_sem, K_MSEC(100)) != 0) {
+					k_sleep(K_MSEC(50));
+				}
+				k_sem_reset(&operation_sem);
+				cancelled = true;
+				break;
+			}
+		}
 
 		process_queue();
+		large_data_send_pending_ack(TX_HANDLE);
+
+		/* Gateway is final destination: log and free completed sessions */
+		uint8_t ld_slot;
+		uint32_t ld_size;
+		uint8_t ld_file_type;
+		uint16_t ld_src_id;
+
+		while (large_data_get_completed(&ld_slot, &ld_size,
+						&ld_file_type, &ld_src_id)) {
+			ALL_INF("Large data complete: %d bytes from ID:%d "
+				"type:%d slot:%d",
+				ld_size, ld_src_id, ld_file_type, ld_slot);
+			large_data_free_completed(ld_src_id);
+		}
+
+		large_data_cleanup_stale_sessions();
+
+		/* Drain extra end_sem gives */
+		while (k_sem_take(&large_data_end_sem, K_NO_WAIT) == 0) {
+		}
+
+		if (cancelled) {
+			k_sleep(K_MSEC(10));
+			k_sem_reset(&operation_sem);
+		}
 
 		k_sleep(K_MSEC(10));
 	}

@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF
 from PyQt5.QtGui import (QPainter, QPen, QBrush, QColor, QFont,
                           QRadialGradient, QPainterPath)
 
-from packet import DeviceType, device_type_str
+from packet import DeviceType, PacketType, device_type_str, DataPacket, DataAck
 from mesh_model import Node, NodeState, MeshNetwork
 from radio_sim import BROADCAST_RANGE
 
@@ -19,6 +19,10 @@ NODE_COLORS = {
     DeviceType.SENSOR:  QColor(230, 126, 34),      # orange
 }
 
+# Data packet colors
+DATA_COLOR = QColor(255, 200, 50)       # yellow for DATA
+DATA_ACK_COLOR = QColor(100, 220, 255)  # cyan for DATA_ACK
+
 NODE_RADIUS = 22
 ANIM_SPEED = 2.0     # pixels per frame
 ANIM_FPS = 60
@@ -28,18 +32,21 @@ class PacketAnimation:
     """Represents an animated packet moving between nodes."""
 
     def __init__(self, src: Node, dst: Node, color: QColor,
-                 label: str = "", callback=None):
+                 label: str = "", callback=None, speed: float = 2.0,
+                 dot_size: float = 5):
         self.src = src
         self.dst = dst
         self.color = color
         self.label = label
         self.callback = callback
-        self.progress = 0.0   # 0.0 to 1.0
+        self.speed = speed      # progress per second (lower = slower)
+        self.dot_size = dot_size
+        self.progress = 0.0     # 0.0 to 1.0
         self.done = False
 
     def update(self, dt: float):
         """Advance animation. dt is time in seconds."""
-        self.progress += dt * 2.0  # 0.5 seconds per packet
+        self.progress += dt * self.speed
         if self.progress >= 1.0:
             self.progress = 1.0
             self.done = True
@@ -153,6 +160,10 @@ class MeshCanvas(QWidget):
                 pair_act = menu.addAction("Start Pairing")
                 pair_act.triggered.connect(lambda: self._start_pairing(node))
 
+            if node.is_sensor and node.state == NodeState.PAIRED:
+                data_act = menu.addAction("Send Data")
+                data_act.triggered.connect(lambda: self._send_data(node))
+
             remove_act = menu.addAction("Remove Node")
             remove_act.triggered.connect(lambda: self._remove_node(node))
         else:
@@ -189,6 +200,10 @@ class MeshCanvas(QWidget):
         steps = self.mesh.start_pairing(node)
         self.queue_animation_steps(steps)
 
+    def _send_data(self, node):
+        steps = self.mesh.simulate_data_send(node)
+        self.queue_animation_steps(steps)
+
     # ===== Animation =====
 
     def queue_animation_steps(self, steps: list):
@@ -202,6 +217,7 @@ class MeshCanvas(QWidget):
             return
 
         step = self.animation_queue.pop(0)
+        pkt = step.get("packet")
 
         if step["type"] == "broadcast":
             src = step["src"]
@@ -213,10 +229,30 @@ class MeshCanvas(QWidget):
         elif step["type"] == "unicast":
             src = step["src"]
             dst = step["dst"]
-            color = NODE_COLORS.get(src.device_type, QColor(200, 200, 200))
-            label = type(step["packet"]).__name__
             callback = step.get("callback")
-            anim = PacketAnimation(src, dst, color, label, callback)
+
+            # Data packets: distinct color + slower speed + bigger dot
+            is_data = isinstance(pkt, DataPacket)
+            is_ack = isinstance(pkt, DataAck)
+
+            if is_data:
+                color = DATA_COLOR
+                label = "DATA"
+                speed = 0.8     # ~1.25 seconds to travel
+                dot_size = 8
+            elif is_ack:
+                color = DATA_ACK_COLOR
+                label = "ACK"
+                speed = 1.2
+                dot_size = 6
+            else:
+                color = NODE_COLORS.get(src.device_type, QColor(200, 200, 200))
+                label = type(pkt).__name__ if pkt else ""
+                speed = 2.0
+                dot_size = 5
+
+            anim = PacketAnimation(src, dst, color, label, callback,
+                                   speed=speed, dot_size=dot_size)
             self.animations.append(anim)
 
         delay = step.get("delay", 300)
@@ -361,12 +397,21 @@ class MeshCanvas(QWidget):
 
             elif isinstance(anim, PacketAnimation):
                 pos = anim.current_pos
+                r = anim.dot_size
+                # Glow effect for data packets
+                if r > 5:
+                    glow = QColor(anim.color)
+                    glow.setAlpha(60)
+                    painter.setPen(Qt.NoPen)
+                    painter.setBrush(QBrush(glow))
+                    painter.drawEllipse(pos, r + 4, r + 4)
                 # Dot
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(anim.color.lighter(150)))
-                painter.drawEllipse(pos, 5, 5)
+                painter.drawEllipse(pos, r, r)
                 # Label
-                painter.setFont(QFont("Consolas", 7))
+                painter.setFont(QFont("Consolas", 8 if r > 5 else 7,
+                                      QFont.Bold if r > 5 else QFont.Normal))
                 painter.setPen(QPen(QColor(255, 255, 200)))
-                painter.drawText(int(pos.x()) + 8, int(pos.y()) - 5,
+                painter.drawText(int(pos.x()) + r + 4, int(pos.y()) - r,
                                  anim.label)

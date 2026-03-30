@@ -18,6 +18,8 @@
 #include "nvs_store.h"
 #include "identity.h"
 #include "display.h"
+#include "psram.h"
+#include "large_data.h"
 #include "at_cmd.h"
 #include <zephyr/app_version.h>
 #include <stdio.h>
@@ -215,6 +217,14 @@ int main(void)
 		LOG_WRN("display init failed, err %d (continuing)", err);
 	} else {
 		display_header(my_device_type, device_id);
+	}
+
+	/* Initialize PSRAM + large data transfer module */
+	err = psram_init();
+	if (err) {
+		LOG_ERR("PSRAM init failed, err %d", err);
+	} else {
+		large_data_init();
 	}
 
 	/* Start AT command handler (reads from console UART) */
