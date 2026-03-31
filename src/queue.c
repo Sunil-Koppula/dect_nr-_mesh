@@ -7,7 +7,7 @@
 #include <zephyr/logging/log.h>
 #include "queue.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(queue, CONFIG_QUEUE_LOG_LEVEL);
 
 K_MSGQ_DEFINE(rx_msgq, sizeof(struct rx_queue_item), RX_QUEUE_SIZE, 4);
 

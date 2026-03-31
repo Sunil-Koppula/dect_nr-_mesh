@@ -24,7 +24,7 @@
 #include "../psram.h"
 #include "../log_all.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(gateway, CONFIG_GATEWAY_LOG_LEVEL);
 
 #define TX_HANDLE 1
 #define RX_HANDLE 2
@@ -225,10 +225,15 @@ void gateway_main(void)
 	gw_sensor_store_ptr = &sensor_store;
 
 	ALL_INF("Gateway mode started (ID:%d, hop:0)", device_id);
+	ALL_INF("  Button 4: scan nearby devices");
 	paired_store_print(&anchor_store);
 	paired_store_print(&sensor_store);
 
 	while (true) {
+		if (k_sem_take(&btn4_sem, K_NO_WAIT) == 0) {
+			scan_nearby(TX_HANDLE, RX_HANDLE);
+		}
+
 		int err = receive_ms(RX_HANDLE, 1000);
 
 		if (err) {

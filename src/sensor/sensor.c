@@ -23,7 +23,7 @@
 #include "../nvs_store.h"
 #include "../log_all.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(sensor, CONFIG_SENSOR_LOG_LEVEL);
 
 #define TX_HANDLE 1
 #define RX_HANDLE 2
@@ -230,10 +230,16 @@ void sensor_main(void)
 	ALL_INF("Sensor ready:");
 	ALL_INF("  Button 2: send small data");
 	ALL_INF("  Button 3: send 50KB large data");
+	ALL_INF("  Button 4: scan nearby devices");
 
 	while (true) {
 		if (k_sem_take(&btn2_sem, K_MSEC(50)) == 0) {
 			sensor_send_data();
+			continue;
+		}
+
+		if (k_sem_take(&btn4_sem, K_MSEC(50)) == 0) {
+			scan_nearby(TX_HANDLE, RX_HANDLE);
 			continue;
 		}
 

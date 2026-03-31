@@ -12,7 +12,7 @@
 #include <zephyr/devicetree.h>
 #include "flash_store.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(flash_store, CONFIG_FLASH_STORE_LOG_LEVEL);
 
 #define EXT_FLASH_NODE DT_NODELABEL(gd25wb256)
 

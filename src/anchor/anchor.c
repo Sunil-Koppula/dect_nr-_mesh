@@ -30,7 +30,7 @@
 #include "../psram.h"
 #include "../nvs_store.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(anchor, CONFIG_ANCHOR_LOG_LEVEL);
 
 #define TX_HANDLE 1
 #define RX_HANDLE 2
@@ -610,6 +610,7 @@ void anchor_main(void)
 
 	paired_store_print(&device_store);
 	paired_store_print(&sensor_store);
+	ALL_INF("  Button 4: scan nearby devices");
 
 	/* RX loop — receive from neighbors, respond, relay, and handle
 	 * large data transfers. Periodically re-discover new neighbors.
@@ -617,6 +618,10 @@ void anchor_main(void)
 	int64_t last_rediscovery = k_uptime_get();
 
 	while (true) {
+		if (k_sem_take(&btn4_sem, K_NO_WAIT) == 0) {
+			scan_nearby(TX_HANDLE, RX_HANDLE);
+		}
+
 		int err = receive_ms(RX_HANDLE, 1000);
 		if (err) {
 			ALL_ERR("Receive failed, err %d", err);

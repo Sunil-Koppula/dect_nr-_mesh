@@ -24,7 +24,7 @@
 #include <zephyr/app_version.h>
 #include <stdio.h>
 
-LOG_MODULE_REGISTER(app);
+LOG_MODULE_REGISTER(main, CONFIG_MAIN_LOG_LEVEL);
 
 BUILD_ASSERT(CONFIG_CARRIER, "Carrier must be configured according to local regulations");
 

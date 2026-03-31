@@ -11,7 +11,7 @@
 #include "large_data.h"
 #include "display.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(radio, CONFIG_RADIO_LOG_LEVEL);
 
 K_SEM_DEFINE(operation_sem, 0, 1);
 K_SEM_DEFINE(deinit_sem, 0, 1);
@@ -171,6 +171,36 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 normal_rx:
 	last_rssi_dbm = evt->rssi_2 / 2;
 	display_update_rssi(last_rssi_dbm);
+
+	/*
+	 * Drop packets not addressed to us to prevent rx_queue overflow.
+	 * Pair requests are broadcast (no dst_device_id check needed).
+	 * All other packet types have dst_device_id at a known offset.
+	 */
+	if (pkt_type != PACKET_TYPE_PAIR_REQUEST && copy_len >= 5) {
+		uint16_t dst_id;
+
+		switch (pkt_type) {
+		case PACKET_TYPE_PAIR_RESPONSE:
+			/* dst_device_id at offset 4 in pair_response_packet_t */
+			memcpy(&dst_id, &local_buf[4], sizeof(dst_id));
+			break;
+		case PACKET_TYPE_PAIR_CONFIRM:
+			/* dst_device_id at offset 4 in pair_confirm_packet_t */
+			memcpy(&dst_id, &local_buf[4], sizeof(dst_id));
+			break;
+		default:
+			/* DATA, DATA_ACK, LARGE_DATA_ACK, LARGE_DATA_NACK:
+			 * dst_device_id at offset 3 */
+			memcpy(&dst_id, &local_buf[3], sizeof(dst_id));
+			break;
+		}
+
+		if (dst_id != device_id) {
+			return;
+		}
+	}
+
 	rx_queue_put(evt->data, evt->len, evt->rssi_2);
 }
 
@@ -276,7 +306,7 @@ int receive(uint32_t handle)
 		.mode = NRF_MODEM_DECT_PHY_RX_MODE_CONTINUOUS,
 		.rssi_interval = NRF_MODEM_DECT_PHY_RSSI_INTERVAL_OFF,
 		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
-		.rssi_level = -100,
+		.rssi_level = -70,
 		.carrier = CONFIG_CARRIER,
 		.duration = CONFIG_RX_PERIOD_S * MSEC_PER_SEC *
 			    NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,

@@ -9,7 +9,7 @@
 #include <zephyr/fs/nvs.h>
 #include "nvs_store.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(nvs_store, CONFIG_NVS_STORE_LOG_LEVEL);
 
 #define NVS_PARTITION		storage_partition
 #define NVS_PARTITION_DEVICE	FIXED_PARTITION_DEVICE(NVS_PARTITION)

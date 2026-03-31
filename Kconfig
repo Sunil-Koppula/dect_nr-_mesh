@@ -39,6 +39,58 @@ config RX_PERIOD_S
 	   Receive window period.
 	   Time is given in seconds.
 
+config RADIO_LOG_LEVEL
+	int "Radio log level"
+	default 1
+
+config ANCHOR_LOG_LEVEL
+	int "Anchor log level"
+	default 1
+
+config GATEWAY_LOG_LEVEL
+	int "Gateway log level"
+	default 1
+
+config SENSOR_LOG_LEVEL
+	int "Sensor log level"
+	default 1
+
+config DISPLAY_LOG_LEVEL
+	int "Display log level"
+	default 1
+
+config FLASH_STORE_LOG_LEVEL
+	int "Flash store log level"
+	default 1
+
+config IDENTITY_LOG_LEVEL
+	int "Identity log level"
+	default 1
+
+config LARGE_DATA_LOG_LEVEL
+	int "Large data log level"
+	default 1
+
+config MAIN_LOG_LEVEL
+	int "Main log level"
+	default 1
+
+config MESH_LOG_LEVEL
+	int "Mesh log level"
+	default 1
+
+config NVS_STORE_LOG_LEVEL
+	int "NVS store log level"
+	default 1
+
+config PSRAM_LOG_LEVEL
+	int "PSRAM log level"
+	default 1
+
+config QUEUE_LOG_LEVEL
+	int "Queue log level"
+	default 1
+
 module = DECT_PHY_MESH
 module-str = DECT NR+ PHY Mesh
 source "$(ZEPHYR_BASE)/subsys/logging/Kconfig.template.log_config"

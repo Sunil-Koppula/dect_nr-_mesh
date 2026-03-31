@@ -8,7 +8,7 @@
 #include "nvs_store.h"
 #include "log_all.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(identity, CONFIG_IDENTITY_LOG_LEVEL);
 
 /* ===== Node identity helpers ===== */
 

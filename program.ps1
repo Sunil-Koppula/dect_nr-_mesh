@@ -48,8 +48,8 @@ foreach ($t in $targets) {
     Write-Host "`n=== Flashing firmware to Board $t (SN: $sn) ===" -ForegroundColor Cyan
 
     # # Upgrade Modem Firmware (uncomment to use)
-    Write-Host "Programming Modem Firmware..." -ForegroundColor Yellow
-    nrfutil 91 modem-firmware-upgrade --firmware $modem_firmware --serial-number $sn
+    # Write-Host "Programming Modem Firmware..." -ForegroundColor Yellow
+    # nrfutil 91 modem-firmware-upgrade --firmware $modem_firmware --serial-number $sn
 
     Write-Host "Flashing $app_hex..." -ForegroundColor Green
     nrfjprog --program $app_hex --chiperase --verify -s $sn

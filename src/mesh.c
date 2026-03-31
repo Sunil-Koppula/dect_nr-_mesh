@@ -11,9 +11,11 @@
 #include "mesh_tx.h"
 #include "crc.h"
 #include "radio.h"
+#include "queue.h"
 #include "identity.h"
+#include "log_all.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(mesh, CONFIG_MESH_LOG_LEVEL);
 
 /* Discovery state */
 static struct discovery_candidate candidates[MAX_CANDIDATES];
@@ -346,4 +348,66 @@ int send_data(uint32_t handle, uint16_t dst_id, const void *payload,
 	memcpy(&pkt->payload[payload_len], &crc, sizeof(crc));
 
 	return transmit(handle, buf, total);
+}
+
+/* === Scan nearby devices === */
+
+int scan_nearby(uint32_t tx_handle, uint32_t rx_handle)
+{
+	ALL_INF("Scanning nearby devices...");
+
+	uint32_t rand_num = next_random();
+
+	int err = send_pair_request(tx_handle, rand_num);
+
+	if (err) {
+		LOG_ERR("Scan: failed to send pair request, err %d", err);
+		return -1;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	discovery_reset();
+
+	/* Listen for responses for 1 second */
+	err = receive_ms(rx_handle, 1000);
+	if (err) {
+		LOG_ERR("Scan: receive failed, err %d", err);
+		return -1;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	/* Drain queue and collect pair responses */
+	struct rx_queue_item item;
+
+	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+		if (item.len < 1) {
+			continue;
+		}
+		if (item.data[0] == PACKET_TYPE_PAIR_RESPONSE &&
+		    item.len >= PAIR_RESPONSE_PACKET_SIZE) {
+			const pair_response_packet_t *resp =
+				(const pair_response_packet_t *)item.data;
+			if (resp->dst_device_id != device_id) {
+				continue;
+			}
+			discovery_add_response(resp, item.rssi_2);
+		}
+	}
+
+	int count = discovery_count();
+
+	ALL_INF("Scan: %d device(s) found", count);
+
+	for (int i = 0; i < count; i++) {
+		const struct discovery_candidate *c = discovery_get(i);
+
+		if (!c) {
+			continue;
+		}
+		ALL_INF("  %s ID:%d h%d %ddBm",
+			device_type_str(c->device_type),
+			c->device_id, c->hop_num, c->rssi_2 / 2);
+	}
+
+	return count;
 }

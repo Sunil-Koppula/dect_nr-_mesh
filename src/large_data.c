@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/drivers/flash.h>
 #include <zephyr/devicetree.h>
 #include "large_data.h"
@@ -33,7 +34,7 @@
 #include "display.h"
 #include "log_all.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(large_data, CONFIG_LARGE_DATA_LOG_LEVEL);
 
 BUILD_ASSERT(LARGE_DATA_MAX_SESSIONS * LARGE_DATA_SLOT_SIZE <= PSRAM_SIZE,
 	     "PSRAM must have enough space for all session slots");
@@ -257,8 +258,40 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 
 	large_data_rx_session_t *s = find_session(pkt->src_device_id);
 
-	if (!s || s->state != LARGE_DATA_STATE_RECEIVING) {
-		ALL_WRN("No active session for sender ID:%d", pkt->src_device_id);
+	if (!s) {
+		ALL_WRN("No session for sender ID:%d", pkt->src_device_id);
+		return;
+	}
+
+	/* If session already completed, re-queue the SUCCESS ACK
+	 * (sender missed it and is re-requesting) */
+	if (s->state == LARGE_DATA_STATE_COMPLETE) {
+		ALL_INF("Re-sending ACK for completed session from ID:%d",
+			pkt->src_device_id);
+		for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
+			if (!pending_responses[i].valid) {
+				large_data_ack_packet_t *ack =
+					(large_data_ack_packet_t *)
+						pending_responses[i].data;
+				ack->packet_type = PACKET_TYPE_LARGE_DATA_ACK;
+				ack->src_device_id = device_id;
+				ack->dst_device_id = pkt->src_device_id;
+				ack->status = STATUS_SUCCESS;
+				pending_responses[i].len =
+					LARGE_DATA_ACK_PACKET_SIZE;
+				pending_responses[i].session = s;
+				pending_responses[i].free_session = false;
+				pending_responses[i].valid = true;
+				k_sem_give(&large_data_end_sem);
+				return;
+			}
+		}
+		return;
+	}
+
+	if (s->state != LARGE_DATA_STATE_RECEIVING) {
+		ALL_WRN("Session for ID:%d in unexpected state %d",
+			pkt->src_device_id, s->state);
 		return;
 	}
 
@@ -356,53 +389,89 @@ static void process_end(const large_data_end_packet_t *pkt, uint16_t len)
 		}
 	}
 
-	/* Queue response: NACK if any missing (send up to MAX per NACK),
-	 * ACK(CRC_FAIL) only if 0 missing but CRC still wrong */
-	for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
-		if (!pending_responses[i].valid) {
-			if (missing_count > 0) {
-				/* Send NACK with up to NACK_MAX_FRAGS missing frag numbers.
-				 * If more are missing, sender will retransmit these,
-				 * then re-send END, and we'll NACK again for the rest. */
-				uint8_t send_count = (missing_count > LARGE_DATA_NACK_MAX_FRAGS)
-					? LARGE_DATA_NACK_MAX_FRAGS
-					: (uint8_t)missing_count;
-				large_data_nack_packet_t *nack =
-					(large_data_nack_packet_t *)pending_responses[i].data;
-				nack->packet_type = PACKET_TYPE_LARGE_DATA_NACK;
-				nack->src_device_id = device_id;
-				nack->dst_device_id = pkt->src_device_id;
-				nack->frag_count = send_count;
-				uint8_t idx = 0;
+	if (missing_count > 0) {
+		/* Queue multiple NACK packets to cover ALL missing fragments
+		 * in one response cycle (each NACK holds up to 13 frag numbers) */
+		uint16_t sent = 0;
+		uint16_t frag_cursor = 0;
+		int nack_count = 0;
 
-				for (uint16_t f = 0;
-				     f < s->frag_total && idx < send_count; f++) {
-					if (!(s->frag_bitmap[f / 8] & (1 << (f % 8)))) {
-						nack->frag_nums[idx++] = f;
-					}
+		while (sent < missing_count) {
+			/* Find a free response slot */
+			int slot = -1;
+
+			for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
+				if (!pending_responses[i].valid) {
+					slot = i;
+					break;
 				}
-				pending_responses[i].len = LARGE_DATA_NACK_PACKET_SIZE +
-					send_count * sizeof(uint16_t);
-				pending_responses[i].session = s;
-				pending_responses[i].free_session = false;
-				s->state = LARGE_DATA_STATE_RECEIVING;
-				s->frags_received--;
-				ALL_INF("NACK with %d/%d missing frags",
-					send_count, missing_count);
-			} else {
+			}
+			if (slot < 0) {
+				ALL_WRN("No free response slots for NACK "
+					"(%d/%d missing sent)",
+					sent, missing_count);
+				break;
+			}
+
+			uint16_t batch = missing_count - sent;
+
+			if (batch > LARGE_DATA_NACK_MAX_FRAGS) {
+				batch = LARGE_DATA_NACK_MAX_FRAGS;
+			}
+
+			large_data_nack_packet_t *nack =
+				(large_data_nack_packet_t *)
+					pending_responses[slot].data;
+			nack->packet_type = PACKET_TYPE_LARGE_DATA_NACK;
+			nack->src_device_id = device_id;
+			nack->dst_device_id = pkt->src_device_id;
+			nack->frag_count = (uint8_t)batch;
+
+			uint8_t idx = 0;
+
+			for (; frag_cursor < s->frag_total && idx < batch;
+			     frag_cursor++) {
+				if (!(s->frag_bitmap[frag_cursor / 8] &
+				      (1 << (frag_cursor % 8)))) {
+					nack->frag_nums[idx++] = frag_cursor;
+				}
+			}
+
+			pending_responses[slot].len =
+				LARGE_DATA_NACK_PACKET_SIZE +
+				idx * sizeof(uint16_t);
+			pending_responses[slot].session = s;
+			pending_responses[slot].free_session = false;
+			pending_responses[slot].valid = true;
+
+			sent += idx;
+			nack_count++;
+		}
+
+		s->state = LARGE_DATA_STATE_RECEIVING;
+		s->frags_received--;
+		ALL_INF("NACK: %d packets covering %d/%d missing frags",
+			nack_count, sent, missing_count);
+		k_sem_give(&large_data_end_sem);
+	} else {
+		/* 0 missing but CRC still wrong — data corruption */
+		for (int i = 0; i < LARGE_DATA_MAX_SESSIONS; i++) {
+			if (!pending_responses[i].valid) {
 				large_data_ack_packet_t *ack =
-					(large_data_ack_packet_t *)pending_responses[i].data;
+					(large_data_ack_packet_t *)
+						pending_responses[i].data;
 				ack->packet_type = PACKET_TYPE_LARGE_DATA_ACK;
 				ack->src_device_id = device_id;
 				ack->dst_device_id = pkt->src_device_id;
 				ack->status = STATUS_CRC_FAIL;
-				pending_responses[i].len = LARGE_DATA_ACK_PACKET_SIZE;
+				pending_responses[i].len =
+					LARGE_DATA_ACK_PACKET_SIZE;
 				pending_responses[i].session = s;
 				pending_responses[i].free_session = true;
+				pending_responses[i].valid = true;
+				k_sem_give(&large_data_end_sem);
+				return;
 			}
-			pending_responses[i].valid = true;
-			k_sem_give(&large_data_end_sem);
-			return;
 		}
 	}
 }
@@ -683,7 +752,9 @@ static int tx_with_retry(uint32_t tx_handle, void *data, size_t len)
 		if (last_op_err == 0) {
 			return 0;
 		}
-		k_sleep(K_MSEC(10 + retries * 5));
+		/* Random backoff to avoid collision with other sensors */
+		k_sleep(K_MSEC(10 + retries * 5 +
+			       (sys_rand32_get() % 20)));
 	}
 	ALL_ERR("TX failed after retries, err %d", last_op_err);
 	return -EIO;
@@ -710,6 +781,14 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 
 	ALL_INF("Large data send: %d bytes, %d frags, last:%d, CRC:0x%04x",
 		data_len, frag_total, last_frag_size, crc);
+
+	/* Flush any stale packets in rx_queue before starting */
+	{
+		struct rx_queue_item flush_item;
+
+		while (rx_queue_get(&flush_item, K_NO_WAIT) == 0) {
+		}
+	}
 
 	/* Step 1: Send INIT */
 	large_data_init_packet_t init_pkt = {
@@ -753,7 +832,7 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 			LOG_INF("Sent %d/%d fragments", i + 1, frag_total);
 		}
 
-		k_sleep(K_MSEC(5));
+		k_sleep(K_MSEC(3 + (sys_rand32_get() % 5)));
 	}
 
 	/* Step 3: Send END (last fragment) */
@@ -777,144 +856,202 @@ int large_data_send(uint32_t tx_handle, uint32_t rx_handle,
 
 	ALL_INF("All %d fragments sent, waiting for ACK...", frag_total);
 
-	/* Step 4: Wait for ACK/NACK, retransmit on NACK */
-	for (int retransmit = 0; retransmit <= RETRANSMIT_MAX; retransmit++) {
-		err = receive_ms(rx_handle, 10000);
-		if (err) {
-			ALL_ERR("Receive for ACK failed, err %d", err);
-			return err;
+	/* Flush rx_queue before listening — stale packets from during TX
+	 * would otherwise fill the queue and cause drops */
+	{
+		struct rx_queue_item flush_item;
+
+		while (rx_queue_get(&flush_item, K_NO_WAIT) == 0) {
 		}
-		k_sem_take(&operation_sem, K_FOREVER);
+	}
 
-		struct rx_queue_item item;
+	/* Step 4: Wait for ACK/NACK, retransmit on NACK.
+	 * Receiver may send multiple NACK packets covering all missing
+	 * fragments. We use a bitmap to accumulate them all. */
+	uint8_t retx_bitmap[LARGE_DATA_BITMAP_MAX];
+
+	for (int retransmit = 0; retransmit <= RETRANSMIT_MAX; retransmit++) {
+		/* Listen in short windows (1s each), up to 10s total.
+		 * Break out as soon as we receive an ACK or NACK. */
 		bool got_nack = false;
-		uint8_t nack_frag_count = 0;
-		uint16_t nack_frags[LARGE_DATA_NACK_MAX_FRAGS];
+		bool got_ack = false;
+		uint8_t ack_status = 0;
+		uint16_t total_missing = 0;
 
-		while (rx_queue_get(&item, K_NO_WAIT) == 0) {
-			if (item.len < 1) {
-				continue;
+		memset(retx_bitmap, 0, sizeof(retx_bitmap));
+
+		for (int poll = 0; poll < 15; poll++) {
+			err = receive_ms(rx_handle, 1000);
+			if (err) {
+				ALL_ERR("Receive for ACK failed, err %d", err);
+				return err;
 			}
+			k_sem_take(&operation_sem, K_FOREVER);
 
-			if (item.data[0] == PACKET_TYPE_LARGE_DATA_ACK &&
-			    item.len >= LARGE_DATA_ACK_PACKET_SIZE) {
-				const large_data_ack_packet_t *ack =
-					(const large_data_ack_packet_t *)item.data;
-				if (ack->dst_device_id == device_id) {
-					if (ack->status == STATUS_SUCCESS) {
-						ALL_INF("Large data transfer SUCCESS");
-						return 0;
+			struct rx_queue_item item;
+
+			while (rx_queue_get(&item, K_NO_WAIT) == 0) {
+				if (item.len < 1) {
+					continue;
+				}
+
+				if (item.data[0] == PACKET_TYPE_LARGE_DATA_ACK &&
+				    item.len >= LARGE_DATA_ACK_PACKET_SIZE) {
+					const large_data_ack_packet_t *ack =
+						(const large_data_ack_packet_t *)
+							item.data;
+					if (ack->dst_device_id == device_id) {
+						got_ack = true;
+						ack_status = ack->status;
 					}
-					ALL_WRN("Large data transfer FAILED: CRC mismatch");
-					return -EIO;
+				}
+
+				if (item.data[0] == PACKET_TYPE_LARGE_DATA_NACK &&
+				    item.len >= LARGE_DATA_NACK_PACKET_SIZE) {
+					const large_data_nack_packet_t *nack =
+						(const large_data_nack_packet_t *)
+							item.data;
+					if (nack->dst_device_id == device_id) {
+						uint8_t cnt = nack->frag_count;
+
+						if (cnt > LARGE_DATA_NACK_MAX_FRAGS) {
+							cnt = LARGE_DATA_NACK_MAX_FRAGS;
+						}
+						for (uint8_t f = 0; f < cnt; f++) {
+							uint16_t fn =
+								nack->frag_nums[f];
+							if (fn < frag_total) {
+								retx_bitmap[fn / 8] |=
+									(1 << (fn % 8));
+								total_missing++;
+							}
+						}
+						got_nack = true;
+					}
 				}
 			}
 
-			if (item.data[0] == PACKET_TYPE_LARGE_DATA_NACK &&
-			    item.len >= LARGE_DATA_NACK_PACKET_SIZE) {
-				const large_data_nack_packet_t *nack =
-					(const large_data_nack_packet_t *)item.data;
-				if (nack->dst_device_id == device_id) {
-					nack_frag_count = nack->frag_count;
-					if (nack_frag_count > LARGE_DATA_NACK_MAX_FRAGS) {
-						nack_frag_count = LARGE_DATA_NACK_MAX_FRAGS;
-					}
-					memcpy(nack_frags, nack->frag_nums,
-					       nack_frag_count * sizeof(uint16_t));
-					got_nack = true;
-				}
+			/* Break out of poll loop as soon as we got a response */
+			if (got_ack || got_nack) {
+				break;
 			}
+
+			/* After 5s with no response, re-send END to prompt
+			 * receiver to re-verify CRC and send ACK/NACK */
+			if (poll == 4 || poll == 9) {
+				ALL_INF("No response after %ds, re-sending END "
+					"to request ACK/NACK",
+					poll + 1);
+				uint8_t end_buf[DATA_LEN_MAX];
+				large_data_end_packet_t *re =
+					(large_data_end_packet_t *)end_buf;
+				re->packet_type = PACKET_TYPE_LARGE_DATA_END;
+				re->src_device_id = device_id;
+				re->dst_device_id = dst_id;
+				re->frag_num = frag_total - 1;
+				memcpy(re->payload,
+				       &src[(uint32_t)transfer_count *
+					    LARGE_DATA_FRAG_SIZE],
+				       last_frag_size);
+				tx_with_retry(tx_handle, end_buf,
+					      LARGE_DATA_END_PACKET_SIZE +
+					      last_frag_size);
+			}
+		}
+
+		if (got_ack) {
+			if (ack_status == STATUS_SUCCESS) {
+				ALL_INF("Large data transfer SUCCESS");
+				return 0;
+			}
+			ALL_WRN("Large data transfer FAILED: CRC mismatch");
+			return -EIO;
 		}
 
 		if (got_nack && retransmit < RETRANSMIT_MAX) {
-			ALL_INF("NACK received: %d missing frags, retransmitting (attempt %d/%d)",
-				nack_frag_count, retransmit + 1, RETRANSMIT_MAX);
+			ALL_INF("NACK: %d missing frags, retransmitting "
+				"(attempt %d/%d)",
+				total_missing, retransmit + 1, RETRANSMIT_MAX);
 
-			/* Wait for the receiver to finish NACK processing and
-			 * return to RX mode before we retransmit. The receiver
-			 * needs to cancel its current RX, send the NACK, run
-			 * cleanup, and restart RX — typically ~100-200ms. */
 			k_sleep(K_MSEC(1000));
 
-			for (uint8_t f = 0; f < nack_frag_count; f++) {
-				uint16_t frag_num = nack_frags[f];
+			bool need_end = false;
 
-				if (frag_num >= frag_total) {
+			for (uint16_t fn = 0; fn < frag_total; fn++) {
+				if (!(retx_bitmap[fn / 8] &
+				      (1 << (fn % 8)))) {
 					continue;
 				}
 
 				uint8_t buf[DATA_LEN_MAX];
-				uint32_t frag_offset = (uint32_t)frag_num * LARGE_DATA_FRAG_SIZE;
+				uint32_t frag_offset =
+					(uint32_t)fn * LARGE_DATA_FRAG_SIZE;
 
-				if (frag_num == frag_total - 1) {
+				if (fn == frag_total - 1) {
 					large_data_end_packet_t *e =
 						(large_data_end_packet_t *)buf;
-					e->packet_type = PACKET_TYPE_LARGE_DATA_END;
+					e->packet_type =
+						PACKET_TYPE_LARGE_DATA_END;
 					e->src_device_id = device_id;
 					e->dst_device_id = dst_id;
-					e->frag_num = frag_num;
+					e->frag_num = fn;
 					memcpy(e->payload, &src[frag_offset],
 					       last_frag_size);
 					err = tx_with_retry(tx_handle, buf,
-						    LARGE_DATA_END_PACKET_SIZE +
-						    last_frag_size);
-					if (err) {
-						return err;
-					}
+						LARGE_DATA_END_PACKET_SIZE +
+						last_frag_size);
+					need_end = true;
 				} else {
 					large_data_transfer_packet_t *t =
-						(large_data_transfer_packet_t *)buf;
-					t->packet_type = PACKET_TYPE_LARGE_DATA_TRANSFER;
+						(large_data_transfer_packet_t *)
+							buf;
+					t->packet_type =
+						PACKET_TYPE_LARGE_DATA_TRANSFER;
 					t->src_device_id = device_id;
 					t->dst_device_id = dst_id;
-					t->frag_num = frag_num;
+					t->frag_num = fn;
 					memcpy(t->payload, &src[frag_offset],
 					       LARGE_DATA_FRAG_SIZE);
 					err = tx_with_retry(tx_handle, buf,
-						    LARGE_DATA_TRANSFER_PACKET_SIZE +
-						    LARGE_DATA_FRAG_SIZE);
-					if (err) {
-						return err;
-					}
+						LARGE_DATA_TRANSFER_PACKET_SIZE
+						+ LARGE_DATA_FRAG_SIZE);
 				}
 
-				LOG_INF("Retransmitted fragment %d", frag_num);
-				k_sleep(K_MSEC(5));
-			}
-
-			bool last_in_nack = false;
-
-			for (uint8_t f = 0; f < nack_frag_count; f++) {
-				if (nack_frags[f] == frag_total - 1) {
-					last_in_nack = true;
-					break;
+				if (err) {
+					return err;
 				}
+				k_sleep(K_MSEC(3 + (sys_rand32_get() % 5)));
 			}
-			if (!last_in_nack) {
+
+			/* Always re-send END to trigger CRC check */
+			if (!need_end) {
 				uint8_t buf[DATA_LEN_MAX];
 				large_data_end_packet_t *e =
 					(large_data_end_packet_t *)buf;
 				uint32_t end_offset =
-					(uint32_t)transfer_count * LARGE_DATA_FRAG_SIZE;
+					(uint32_t)transfer_count *
+					LARGE_DATA_FRAG_SIZE;
 				e->packet_type = PACKET_TYPE_LARGE_DATA_END;
 				e->src_device_id = device_id;
 				e->dst_device_id = dst_id;
 				e->frag_num = frag_total - 1;
-				memcpy(e->payload, &src[end_offset], last_frag_size);
+				memcpy(e->payload, &src[end_offset],
+				       last_frag_size);
 				err = tx_with_retry(tx_handle, buf,
-					    LARGE_DATA_END_PACKET_SIZE +
-					    last_frag_size);
+					LARGE_DATA_END_PACKET_SIZE +
+					last_frag_size);
 				if (err) {
 					return err;
 				}
 			}
 
-			ALL_INF("Retransmission done, waiting for ACK...");
+			ALL_INF("Retransmitted %d frags, waiting for ACK...",
+				total_missing);
 			continue;
 		}
 
 		if (!got_nack) {
-			ALL_WRN("No ACK/NACK received for large data transfer");
+			ALL_WRN("No ACK/NACK received");
 			return -ETIMEDOUT;
 		}
 	}
@@ -1022,7 +1159,7 @@ int large_data_send_from_flash(uint32_t tx_handle, uint32_t rx_handle,
 			LOG_INF("Sent %d/%d fragments", i + 1, frag_total);
 		}
 
-		k_sleep(K_MSEC(5));
+		k_sleep(K_MSEC(3 + (sys_rand32_get() % 5)));
 	}
 
 	/* Step 3: Send END (last fragment) */
@@ -1147,7 +1284,7 @@ int large_data_send_from_flash(uint32_t tx_handle, uint32_t rx_handle,
 				}
 
 				LOG_INF("Retransmitted fragment %d", frag_num);
-				k_sleep(K_MSEC(5));
+				k_sleep(K_MSEC(3 + (sys_rand32_get() % 5)));
 			}
 
 			/* Re-send END if not in NACK list */

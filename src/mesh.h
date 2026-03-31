@@ -66,4 +66,12 @@ const struct mesh_neighbor *neighbor_best_route(void);
 /* Reset the neighbor table */
 void neighbor_reset(void);
 
+/* === Scan nearby devices === */
+
+/* Broadcast a pair request and collect responses for 1 second.
+ * Logs and displays each responding device's type, ID, hop, and RSSI.
+ * tx_handle/rx_handle: PHY handles for TX/RX.
+ * Returns number of devices found. */
+int scan_nearby(uint32_t tx_handle, uint32_t rx_handle);
+
 #endif /* MESH_H */

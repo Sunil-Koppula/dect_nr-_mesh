@@ -18,7 +18,7 @@
 #include <zephyr/devicetree.h>
 #include "psram.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(psram, CONFIG_PSRAM_LOG_LEVEL);
 
 #define PSRAM_NODE DT_NODELABEL(psram0)
 
