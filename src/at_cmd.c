@@ -30,6 +30,10 @@
 const void *gw_anchor_store_ptr;
 const void *gw_sensor_store_ptr;
 
+/* AT+SEND_*_DATA semaphores — signaled to gateway main loop */
+K_SEM_DEFINE(send_small_data_sem, 0, 1);
+K_SEM_DEFINE(send_large_data_sem, 0, 1);
+
 /* Thread configuration */
 #define AT_CMD_STACK_SIZE 2048
 #define AT_CMD_PRIORITY   10
@@ -147,6 +151,30 @@ static void cmd_reset(void)
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
+static void cmd_send_small_data(void)
+{
+	if (my_device_type != DEVICE_TYPE_GATEWAY) {
+		printk("+SEND_SMALL_DATA: only available on gateway\r\n");
+		printk("ERROR\r\n");
+		return;
+	}
+	printk("+SEND_SMALL_DATA: requesting small data from all sensors...\r\n");
+	k_sem_give(&send_small_data_sem);
+	printk("OK\r\n");
+}
+
+static void cmd_send_large_data(void)
+{
+	if (my_device_type != DEVICE_TYPE_GATEWAY) {
+		printk("+SEND_LARGE_DATA: only available on gateway\r\n");
+		printk("ERROR\r\n");
+		return;
+	}
+	printk("+SEND_LARGE_DATA: requesting large data from all sensors...\r\n");
+	k_sem_give(&send_large_data_sem);
+	printk("OK\r\n");
+}
+
 static void cmd_help(void)
 {
 	printk("+HELP:\r\n");
@@ -160,6 +188,8 @@ static void cmd_help(void)
 	printk("  AT+TXPOWER?     TX power\r\n");
 	printk("  AT+INFO?        All device info\r\n");
 	printk("  AT+PAIR?        Paired devices\r\n");
+	printk("  AT+SEND_SMALL_DATA  Request small data (gateway)\r\n");
+	printk("  AT+SEND_LARGE_DATA  Request large data (gateway)\r\n");
 	printk("  AT+FACTORY_RESET  Factory reset\r\n");
 	printk("  AT+RESET        Reboot\r\n");
 	printk("  AT+HELP         This help\r\n");
@@ -182,6 +212,8 @@ static const struct {
 	{ "+TXPOWER?",     cmd_txpower },
 	{ "+INFO?",        cmd_info },
 	{ "+PAIR?",        cmd_pair },
+	{ "+SEND_SMALL_DATA", cmd_send_small_data },
+	{ "+SEND_LARGE_DATA", cmd_send_large_data },
 	{ "+FACTORY_RESET", cmd_factory_reset },
 	{ "+RESET",        cmd_reset },
 	{ "+HELP",         cmd_help },

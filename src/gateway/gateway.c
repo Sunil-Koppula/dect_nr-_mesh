@@ -22,6 +22,7 @@
 #include "../crc.h"
 #include "../large_data.h"
 #include "../psram.h"
+#include "../at_cmd.h"
 #include "../log_all.h"
 
 LOG_MODULE_REGISTER(gateway, CONFIG_GATEWAY_LOG_LEVEL);
@@ -158,6 +159,68 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		status == STATUS_SUCCESS ? "OK" : "CRC_FAIL");
 }
 
+/* === Send DATA_REQUEST to all paired devices === */
+
+static void send_data_request_to_all(uint8_t request_type)
+{
+	const char *type_str = (request_type == DATA_REQUEST_LARGE)
+			       ? "LARGE" : "SMALL";
+
+	ALL_INF("Sending %s DATA_REQUEST to all paired devices...", type_str);
+
+	/* Send to all paired anchors */
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		data_request_packet_t req = {
+			.packet_type = PACKET_TYPE_DATA_REQUEST,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+			.request_type = request_type,
+		};
+
+		int err = transmit_and_wait(&req, sizeof(req));
+
+		if (err) {
+			ALL_ERR("Failed to send DATA_REQUEST to ID:%d", dev_id);
+		} else {
+			ALL_INF("%s DATA_REQUEST sent to ANCHOR ID:%d",
+				type_str, dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Send to directly paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		data_request_packet_t req = {
+			.packet_type = PACKET_TYPE_DATA_REQUEST,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+			.request_type = request_type,
+		};
+
+		int err = transmit_and_wait(&req, sizeof(req));
+
+		if (err) {
+			ALL_ERR("Failed to send DATA_REQUEST to ID:%d", dev_id);
+		} else {
+			ALL_INF("%s DATA_REQUEST sent to SENSOR ID:%d",
+				type_str, dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+}
+
 /* === Process all queued packets (called when RX window ends) === */
 
 static void process_queue(void)
@@ -206,6 +269,10 @@ static void process_queue(void)
 			/* Not applicable for gateway */
 			break;
 
+		case PACKET_TYPE_DATA_REQUEST:
+			/* Gateway originates, doesn't process incoming */
+			break;
+
 		default:
 			break;
 		}
@@ -232,6 +299,14 @@ void gateway_main(void)
 	while (true) {
 		if (k_sem_take(&btn4_sem, K_NO_WAIT) == 0) {
 			scan_nearby(TX_HANDLE, RX_HANDLE);
+		}
+
+		if (k_sem_take(&send_small_data_sem, K_NO_WAIT) == 0) {
+			send_data_request_to_all(DATA_REQUEST_SMALL);
+		}
+
+		if (k_sem_take(&send_large_data_sem, K_NO_WAIT) == 0) {
+			send_data_request_to_all(DATA_REQUEST_LARGE);
 		}
 
 		int err = receive_ms(RX_HANDLE, 1000);

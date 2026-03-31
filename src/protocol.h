@@ -31,6 +31,7 @@ typedef enum {
 	PACKET_TYPE_STREAM_REQUEST      = 0x0B,
 	PACKET_TYPE_OTA_INIT            = 0x0C,
 	PACKET_TYPE_OTA_ACK             = 0x0D,
+	PACKET_TYPE_DATA_REQUEST        = 0x0E,
 } packet_type_t;
 
 /* General Status Codes — unified across all packet types */
@@ -127,6 +128,20 @@ typedef struct {
 } __attribute__((packed)) data_ack_packet_t;
 
 #define DATA_ACK_PACKET_SIZE sizeof(data_ack_packet_t)
+
+/* Data request type */
+#define DATA_REQUEST_SMALL  0x00
+#define DATA_REQUEST_LARGE  0x01
+
+/* Data Request Packet (6 bytes) — gateway requests sensors to send data */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_DATA_REQUEST */
+	uint16_t src_device_id;     /* originator */
+	uint16_t dst_device_id;     /* target device */
+	uint8_t request_type;       /* DATA_REQUEST_SMALL / DATA_REQUEST_LARGE */
+} __attribute__((packed)) data_request_packet_t;
+
+#define DATA_REQUEST_PACKET_SIZE sizeof(data_request_packet_t)
 
 /********** Large Data Transfer Packets **********/
 

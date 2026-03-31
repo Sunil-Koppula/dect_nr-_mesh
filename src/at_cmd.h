@@ -20,14 +20,22 @@
  *   AT+OTA_STATUS?           → +OTA_STATUS: staging version + validity
  *   AT+FACTORY_RESET         → Clear NVM + staging + reboot
  *   AT+RESET                 → Reboot
+ *   AT+SEND_DATA             → Request all sensors to send data (gateway)
  */
 
 #ifndef AT_CMD_H
 #define AT_CMD_H
 
+#include <zephyr/kernel.h>
+
 /* Initialize the AT command handler.
  * Starts a UART RX thread that reads lines from the console UART.
  * Call once from main after all subsystems are initialized. */
 void at_cmd_init(void);
+
+/* Semaphores signaled by AT+SEND_SMALL_DATA / AT+SEND_LARGE_DATA.
+ * Gateway main loop checks these to initiate data requests. */
+extern struct k_sem send_small_data_sem;
+extern struct k_sem send_large_data_sem;
 
 #endif /* AT_CMD_H */

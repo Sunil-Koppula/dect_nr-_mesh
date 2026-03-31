@@ -299,6 +299,70 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 	}
 }
 
+static void handle_data_request(const data_request_packet_t *pkt)
+{
+	if (pkt->dst_device_id != device_id) {
+		return;
+	}
+
+	const char *type_str = (pkt->request_type == DATA_REQUEST_LARGE)
+			       ? "LARGE" : "SMALL";
+
+	ALL_INF("%s DATA_REQUEST from ID:%d, forwarding...",
+		type_str, pkt->src_device_id);
+
+	/* Forward to all paired devices (skip the sender) */
+	for (int i = 0; i < device_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&device_store, i, &dev_id) != 0) {
+			continue;
+		}
+		if (dev_id == pkt->src_device_id) {
+			continue;
+		}
+
+		data_request_packet_t fwd = {
+			.packet_type = PACKET_TYPE_DATA_REQUEST,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+			.request_type = pkt->request_type,
+		};
+		int err = transmit_and_wait(&fwd, sizeof(fwd));
+
+		if (err) {
+			ALL_ERR("Failed to forward DATA_REQUEST to ID:%d", dev_id);
+		} else {
+			ALL_INF("DATA_REQUEST forwarded to ID:%d", dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Forward to all paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		data_request_packet_t fwd = {
+			.packet_type = PACKET_TYPE_DATA_REQUEST,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+			.request_type = pkt->request_type,
+		};
+		int err = transmit_and_wait(&fwd, sizeof(fwd));
+
+		if (err) {
+			ALL_ERR("Failed to forward DATA_REQUEST to ID:%d", dev_id);
+		} else {
+			ALL_INF("DATA_REQUEST forwarded to SENSOR ID:%d", dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+}
+
 static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 {
 	if (pkt->dst_device_id != device_id) {
@@ -450,6 +514,14 @@ static void process_queue(void)
 		case PACKET_TYPE_LARGE_DATA_ACK:
 		case PACKET_TYPE_LARGE_DATA_NACK:
 			/* Handled during large_data_send() own RX loop */
+			break;
+
+		case PACKET_TYPE_DATA_REQUEST:
+			if (item.len >= DATA_REQUEST_PACKET_SIZE) {
+				handle_data_request(
+					(const data_request_packet_t *)
+						item.data);
+			}
 			break;
 
 		default:
