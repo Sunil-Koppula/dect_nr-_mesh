@@ -45,8 +45,10 @@ extern struct k_sem parent_query_sem;
 extern uint16_t parent_query_sensor_id;
 
 /* AT+SENSOR_ALL / AT+ANCHOR_ALL — query parent info for all devices.
- * Sends PARENT_QUERY to all paired anchors and sensors. */
+ * Sends PARENT_QUERY to all paired anchors and sensors.
+ * parent_query_all_filter: DEVICE_TYPE_SENSOR or DEVICE_TYPE_ANCHOR */
 extern struct k_sem parent_query_all_sem;
+extern uint8_t parent_query_all_filter;
 
 /* AT+REPAIR — broadcast factory reset to all paired devices, then self.
  * Gateway main loop checks this, sends REPAIR to all, waits 2s, resets. */

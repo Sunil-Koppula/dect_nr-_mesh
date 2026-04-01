@@ -18,6 +18,7 @@ target_sources(app PRIVATE
   src/identity.c
   src/flash_store.c
   src/at_cmd.c
+  src/common.c
   src/display.c
   src/gateway/gateway.c
   src/anchor/anchor.c

@@ -15,6 +15,7 @@
 #include "identity.h"
 #include "nvs_store.h"
 #include "log_all.h"
+#include "common.h"
 
 LOG_MODULE_REGISTER(mesh, CONFIG_MESH_LOG_LEVEL);
 
@@ -401,22 +402,7 @@ int scan_nearby(uint32_t tx_handle, uint32_t rx_handle)
 	k_sem_take(&operation_sem, K_FOREVER);
 
 	/* Drain queue and collect pair responses */
-	struct rx_queue_item item;
-
-	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
-		if (item.len < 1) {
-			continue;
-		}
-		if (item.data[0] == PACKET_TYPE_PAIR_RESPONSE &&
-		    item.len >= PAIR_RESPONSE_PACKET_SIZE) {
-			const pair_response_packet_t *resp =
-				(const pair_response_packet_t *)item.data;
-			if (resp->dst_device_id != device_id) {
-				continue;
-			}
-			discovery_add_response(resp, item.rssi_2);
-		}
-	}
+	drain_discovery_responses(false);
 
 	int count = discovery_count();
 

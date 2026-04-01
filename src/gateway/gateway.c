@@ -26,10 +26,10 @@
 #include "../psram.h"
 #include "../at_cmd.h"
 #include "../log_all.h"
+#include "../common.h"
 
 LOG_MODULE_REGISTER(gateway, CONFIG_GATEWAY_LOG_LEVEL);
 
-#define TX_HANDLE 1
 #define RX_HANDLE 2
 
 /* Paired device stores */
@@ -45,38 +45,57 @@ static const paired_store_t sensor_store = {
 	.label = "Sensor",
 };
 
-/* === TX helper: transmit and wait for completion === */
+/* === Broadcast helper: send a packet to all paired anchors + sensors === */
 
-static int transmit_and_wait(void *data, size_t len)
+static void broadcast_to_all(void *pkt, size_t pkt_size,
+			     size_t dst_offset, const char *label)
 {
-	int err = transmit(TX_HANDLE, data, len);
+	uint8_t *buf = (uint8_t *)pkt;
 
-	if (err) {
-		return err;
+	/* Send to all paired anchors */
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		memcpy(buf + dst_offset, &dev_id, sizeof(dev_id));
+
+		int err = transmit_and_wait(pkt, pkt_size);
+
+		if (err) {
+			ALL_ERR("Failed to send %s to anchor ID:%d",
+				label, dev_id);
+		} else {
+			ALL_INF("%s sent to ANCHOR ID:%d", label, dev_id);
+		}
+		k_sleep(K_MSEC(10));
 	}
-	k_sem_take(&operation_sem, K_FOREVER);
-	return 0;
+
+	/* Send to all directly paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		memcpy(buf + dst_offset, &dev_id, sizeof(dev_id));
+
+		int err = transmit_and_wait(pkt, pkt_size);
+
+		if (err) {
+			ALL_ERR("Failed to send %s to sensor ID:%d",
+				label, dev_id);
+		} else {
+			ALL_INF("%s sent to SENSOR ID:%d", label, dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
 }
 
 /* === Packet handlers === */
-
-static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2)
-{
-	ALL_INF("Pair request from %s ID:%d (RSSI:%d)",
-		device_type_str(pkt->device_type), pkt->device_id, rssi_2 / 2);
-
-	uint32_t hash = compute_pair_hash(pkt->device_id, pkt->random_num);
-
-	int err = send_pair_response(TX_HANDLE, pkt->device_id, hash);
-
-	if (err) {
-		LOG_ERR("Failed to send pair response, err %d", err);
-		return;
-	}
-	k_sem_take(&operation_sem, K_FOREVER);
-
-	ALL_INF("Pair response sent to ID:%d", pkt->device_id);
-}
 
 static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 {
@@ -121,212 +140,34 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 
 static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 {
-	if (pkt->dst_device_id != device_id) {
-		return;
-	}
-
-	uint16_t payload_len = pkt->payload_len;
-
-	/* Verify CRC */
-	uint16_t rx_crc;
-
-	memcpy(&rx_crc, &pkt->payload[payload_len], sizeof(rx_crc));
-	uint16_t calc_crc = compute_crc16(pkt->payload, payload_len);
-	uint8_t status = (rx_crc == calc_crc) ? STATUS_SUCCESS : STATUS_CRC_FAIL;
-
-	if (status == STATUS_SUCCESS) {
-		ALL_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
-			pkt->src_device_id, payload_len, rssi_2 / 2);
-	} else {
-		ALL_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
-			pkt->src_device_id, payload_len, rssi_2 / 2);
-	}
-
-	data_ack_packet_t ack = {
-		.packet_type = PACKET_TYPE_DATA_ACK,
-		.src_device_id = device_id,
-		.dst_device_id = pkt->src_device_id,
-		.hop_num = my_hop_num,
-		.status = status,
-	};
-
-	int err = transmit_and_wait(&ack, sizeof(ack));
-
-	if (err) {
-		ALL_ERR("Failed to send data ACK, err %d", err);
-		return;
-	}
-
-	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
-		status == STATUS_SUCCESS ? "OK" : "CRC_FAIL");
+	common_data_verify_and_ack(pkt, len, rssi_2);
 }
 
-/* === Send DATA_REQUEST to all paired devices === */
+/* === PARENT_RESPONSE deduplication + filtering === */
 
-static void send_data_request_to_all(uint8_t request_type)
-{
-	const char *type_str = (request_type == DATA_REQUEST_LARGE)
-			       ? "LARGE" : "SMALL";
-
-	ALL_INF("Sending %s DATA_REQUEST to all paired devices...", type_str);
-
-	/* Send to all paired anchors */
-	for (int i = 0; i < anchor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		data_request_packet_t req = {
-			.packet_type = PACKET_TYPE_DATA_REQUEST,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.request_type = request_type,
-		};
-
-		int err = transmit_and_wait(&req, sizeof(req));
-
-		if (err) {
-			ALL_ERR("Failed to send DATA_REQUEST to ID:%d", dev_id);
-		} else {
-			ALL_INF("%s DATA_REQUEST sent to ANCHOR ID:%d",
-				type_str, dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Send to directly paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		data_request_packet_t req = {
-			.packet_type = PACKET_TYPE_DATA_REQUEST,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.request_type = request_type,
-		};
-
-		int err = transmit_and_wait(&req, sizeof(req));
-
-		if (err) {
-			ALL_ERR("Failed to send DATA_REQUEST to ID:%d", dev_id);
-		} else {
-			ALL_INF("%s DATA_REQUEST sent to SENSOR ID:%d",
-				type_str, dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-}
-
-/* === Send PARENT_QUERY for a specific sensor === */
-
-static void send_parent_query(uint16_t sensor_id)
-{
-	ALL_INF("Sending PARENT_QUERY for sensor ID:%d", sensor_id);
-
-	/* Send to all paired anchors (they will relay to the sensor) */
-	for (int i = 0; i < anchor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		parent_query_packet_t query = {
-			.packet_type = PACKET_TYPE_PARENT_QUERY,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-
-		int err = transmit_and_wait(&query, sizeof(query));
-
-		if (err) {
-			ALL_ERR("Failed to send PARENT_QUERY to anchor ID:%d",
-				dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Also send directly to the sensor (if it's directly paired) */
-	if (paired_store_contains(&sensor_store, sensor_id)) {
-		parent_query_packet_t query = {
-			.packet_type = PACKET_TYPE_PARENT_QUERY,
-			.src_device_id = device_id,
-			.dst_device_id = sensor_id,
-		};
-
-		int err = transmit_and_wait(&query, sizeof(query));
-
-		if (err) {
-			ALL_ERR("Failed to send PARENT_QUERY to sensor ID:%d",
-				sensor_id);
-		}
-	}
-}
-
-/* === Send PARENT_QUERY to ALL paired devices === */
-
-static void send_parent_query_all(void)
-{
-	ALL_INF("Sending PARENT_QUERY to all paired devices...");
-
-	/* Send to all paired anchors (they respond + relay to children) */
-	for (int i = 0; i < anchor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		parent_query_packet_t query = {
-			.packet_type = PACKET_TYPE_PARENT_QUERY,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-
-		int err = transmit_and_wait(&query, sizeof(query));
-
-		if (err) {
-			ALL_ERR("Failed to send PARENT_QUERY to anchor ID:%d",
-				dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Send to directly paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		parent_query_packet_t query = {
-			.packet_type = PACKET_TYPE_PARENT_QUERY,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-
-		int err = transmit_and_wait(&query, sizeof(query));
-
-		if (err) {
-			ALL_ERR("Failed to send PARENT_QUERY to sensor ID:%d",
-				dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-}
-
-/* === Handle PARENT_RESPONSE from a sensor/anchor === */
+#define MAX_SEEN_RESPONSES 32
+static uint16_t seen_ids[MAX_SEEN_RESPONSES];
+static int seen_count;
+static uint8_t response_filter;  /* 0 = show all, else filter by device_type */
 
 static void handle_parent_response(const parent_response_packet_t *pkt)
 {
 	if (pkt->dst_device_id != device_id) {
+		return;
+	}
+
+	/* Skip duplicates */
+	for (int i = 0; i < seen_count; i++) {
+		if (seen_ids[i] == pkt->src_device_id) {
+			return;
+		}
+	}
+	if (seen_count < MAX_SEEN_RESPONSES) {
+		seen_ids[seen_count++] = pkt->src_device_id;
+	}
+
+	/* Filter by device type if set */
+	if (response_filter != 0 && pkt->device_type != response_filter) {
 		return;
 	}
 
@@ -338,135 +179,120 @@ static void handle_parent_response(const parent_response_packet_t *pkt)
 		pkt->hop_num);
 }
 
-/* === Send REPAIR to all paired devices, wait 2s, factory reset === */
+/* === AT command actions === */
+
+static void send_data_request_to_all(uint8_t request_type)
+{
+	ALL_INF("Sending %s DATA_REQUEST to all...",
+		(request_type == DATA_REQUEST_LARGE) ? "LARGE" : "SMALL");
+
+	data_request_packet_t req = {
+		.packet_type = PACKET_TYPE_DATA_REQUEST,
+		.src_device_id = device_id,
+		.request_type = request_type,
+	};
+
+	broadcast_to_all(&req, sizeof(req),
+			 offsetof(data_request_packet_t, dst_device_id),
+			 "DATA_REQUEST");
+}
+
+static void send_parent_query(uint16_t target_id)
+{
+	seen_count = 0;
+	response_filter = 0;  /* Show all responses for specific query */
+
+	/* Check locally first — is the target directly paired with us? */
+	if (paired_store_contains(&sensor_store, target_id)) {
+		ALL_INF("SENSOR ID: %d is at GATEWAY ID: %d, Hop: 1",
+			target_id, device_id);
+		return;
+	}
+	if (paired_store_contains(&anchor_store, target_id)) {
+		ALL_INF("ANCHOR ID: %d is at GATEWAY ID: %d, Hop: 1",
+			target_id, device_id);
+		return;
+	}
+
+	/* Not found locally — broadcast to anchors */
+	ALL_INF("ID:%d not directly paired, querying anchors...", target_id);
+
+	parent_query_packet_t query = {
+		.packet_type = PACKET_TYPE_PARENT_QUERY,
+		.src_device_id = device_id,
+		.target_id = target_id,
+	};
+
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		query.dst_device_id = dev_id;
+		int err = transmit_and_wait(&query, sizeof(query));
+
+		if (err) {
+			ALL_ERR("Failed to send PARENT_QUERY to anchor ID:%d",
+				dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+}
+
+static void send_parent_query_all(void)
+{
+	seen_count = 0;
+	response_filter = parent_query_all_filter;
+	ALL_INF("Sending PARENT_QUERY to all %s...",
+		(response_filter == DEVICE_TYPE_SENSOR) ? "sensors" : "anchors");
+
+	parent_query_packet_t query = {
+		.packet_type = PACKET_TYPE_PARENT_QUERY,
+		.src_device_id = device_id,
+		.target_id = 0,  /* 0 = query all */
+	};
+
+	broadcast_to_all(&query, sizeof(query),
+			 offsetof(parent_query_packet_t, dst_device_id),
+			 "PARENT_QUERY");
+}
 
 static void send_repair_all(void)
 {
-	ALL_INF("Broadcasting REPAIR to all paired devices...");
+	ALL_INF("Broadcasting REPAIR to all...");
 
-	/* Send to all paired anchors */
-	for (int i = 0; i < anchor_store.max_entries; i++) {
-		uint16_t dev_id;
+	repair_packet_t pkt = {
+		.packet_type = PACKET_TYPE_REPAIR,
+		.src_device_id = device_id,
+	};
 
-		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
-			continue;
-		}
+	broadcast_to_all(&pkt, sizeof(pkt),
+			 offsetof(repair_packet_t, dst_device_id),
+			 "REPAIR");
 
-		repair_packet_t pkt = {
-			.packet_type = PACKET_TYPE_REPAIR,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-
-		int err = transmit_and_wait(&pkt, sizeof(pkt));
-
-		if (err) {
-			ALL_ERR("Failed to send REPAIR to anchor ID:%d",
-				dev_id);
-		} else {
-			ALL_INF("REPAIR sent to ANCHOR ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Send to directly paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		repair_packet_t pkt = {
-			.packet_type = PACKET_TYPE_REPAIR,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-
-		int err = transmit_and_wait(&pkt, sizeof(pkt));
-
-		if (err) {
-			ALL_ERR("Failed to send REPAIR to sensor ID:%d",
-				dev_id);
-		} else {
-			ALL_INF("REPAIR sent to SENSOR ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	ALL_INF("REPAIR broadcast complete, waiting 2s before self-reset...");
+	ALL_INF("Waiting 2s before self-reset...");
 	k_sleep(K_SECONDS(2));
 
-	ALL_INF("Clearing NVM and rebooting...");
-	storage_clear_all();
-	k_sleep(K_MSEC(500));
-	sys_reboot(SYS_REBOOT_COLD);
+	factory_reset_reboot();
 }
-
-/* === Send SET_RSSI to all paired devices, store locally, reboot === */
 
 static void send_set_rssi_all(int16_t rssi_dbm)
 {
-	ALL_INF("Broadcasting SET_RSSI %d dBm to all paired devices...",
-		rssi_dbm);
+	ALL_INF("Broadcasting SET_RSSI %d dBm to all...", rssi_dbm);
 
-	/* Send to all paired anchors */
-	for (int i = 0; i < anchor_store.max_entries; i++) {
-		uint16_t dev_id;
+	set_rssi_packet_t pkt = {
+		.packet_type = PACKET_TYPE_SET_RSSI,
+		.src_device_id = device_id,
+		.rssi_dbm = rssi_dbm,
+	};
 
-		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
-			continue;
-		}
+	broadcast_to_all(&pkt, sizeof(pkt),
+			 offsetof(set_rssi_packet_t, dst_device_id),
+			 "SET_RSSI");
 
-		set_rssi_packet_t pkt = {
-			.packet_type = PACKET_TYPE_SET_RSSI,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.rssi_dbm = rssi_dbm,
-		};
-
-		int err = transmit_and_wait(&pkt, sizeof(pkt));
-
-		if (err) {
-			ALL_ERR("Failed to send SET_RSSI to anchor ID:%d",
-				dev_id);
-		} else {
-			ALL_INF("SET_RSSI sent to ANCHOR ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Send to directly paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		set_rssi_packet_t pkt = {
-			.packet_type = PACKET_TYPE_SET_RSSI,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.rssi_dbm = rssi_dbm,
-		};
-
-		int err = transmit_and_wait(&pkt, sizeof(pkt));
-
-		if (err) {
-			ALL_ERR("Failed to send SET_RSSI to sensor ID:%d",
-				dev_id);
-		} else {
-			ALL_INF("SET_RSSI sent to SENSOR ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Store locally and reboot */
-	ALL_INF("Storing RSSI threshold %d dBm and rebooting...", rssi_dbm);
-	mesh_rssi_threshold_store(rssi_dbm);
-	k_sleep(K_MSEC(500));
-	sys_reboot(SYS_REBOOT_COLD);
+	rssi_store_and_reboot(rssi_dbm);
 }
 
 /* === Process all queued packets (called when RX window ends) === */
@@ -485,7 +311,7 @@ static void process_queue(void)
 		switch (pkt_type) {
 		case PACKET_TYPE_PAIR_REQUEST:
 			if (item.len >= PAIR_REQUEST_PACKET_SIZE) {
-				handle_pair_request(
+				common_handle_pair_request(
 					(const pair_request_packet_t *)item.data,
 					item.rssi_2);
 			}
@@ -575,12 +401,10 @@ void gateway_main(void)
 
 		if (k_sem_take(&repair_sem, K_NO_WAIT) == 0) {
 			send_repair_all();
-			/* Does not return — reboots */
 		}
 
 		if (k_sem_take(&set_rssi_sem, K_NO_WAIT) == 0) {
 			send_set_rssi_all(set_rssi_value);
-			/* Does not return — reboots */
 		}
 
 		int err = receive_ms(RX_HANDLE, 1000);

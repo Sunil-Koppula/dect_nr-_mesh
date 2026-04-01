@@ -31,14 +31,14 @@
 #include "../psram.h"
 #include "../nvs_store.h"
 #include "../at_cmd.h"
+#include "../common.h"
 
 LOG_MODULE_REGISTER(anchor, CONFIG_ANCHOR_LOG_LEVEL);
 
-#define TX_HANDLE 1
 #define RX_HANDLE 2
 
 #define PAIR_RETRY_MAX      5
-#define REDISCOVERY_INTERVAL_MS  (2 * 60 * 1000)  /* 2 minutes */
+#define REDISCOVERY_INTERVAL_MS  (30 * 60 * 1000)  /* 30 minutes */
 
 /* Paired device stores */
 static const paired_store_t device_store = {
@@ -53,17 +53,106 @@ static const paired_store_t sensor_store = {
 	.label = "Sensor",
 };
 
-/* === TX helper: transmit and wait for completion === */
+/* === Recalculate hop number from neighbor table === */
 
-static int transmit_and_wait(void *data, size_t len)
+static void recalculate_hop(void)
 {
-	int err = transmit(TX_HANDLE, data, len);
+	const struct mesh_neighbor *best = neighbor_best_route();
 
-	if (err) {
-		return err;
+	if (!best) {
+		return;
 	}
-	k_sem_take(&operation_sem, K_FOREVER);
-	return 0;
+
+	uint8_t new_hop = best->hop_num + 1;
+
+	if (new_hop != my_hop_num) {
+		ALL_INF("Hop changed: %d -> %d (best neighbor ID:%d hop:%d)",
+			my_hop_num, new_hop, best->device_id, best->hop_num);
+		my_hop_num = new_hop;
+
+		/* Update NVM */
+		node_identity_t identity = {
+			.device_id = device_id,
+			.device_type = DEVICE_TYPE_ANCHOR,
+			.parent_id = best->device_id,
+			.parent_hop = best->hop_num,
+		};
+		int err = node_store_identity(&identity);
+
+		if (err) {
+			ALL_ERR("Failed to update identity, err %d", err);
+		}
+	}
+}
+
+/* === Downstream-only forwarding === */
+
+static bool is_downstream(uint16_t dev_id)
+{
+	for (int i = 0; i < neighbor_count; i++) {
+		if (neighbor_table[i].device_id == dev_id) {
+			return neighbor_table[i].hop_num > my_hop_num;
+		}
+	}
+	return false;
+}
+
+static bool is_upstream(uint16_t dev_id)
+{
+	for (int i = 0; i < neighbor_count; i++) {
+		if (neighbor_table[i].device_id == dev_id) {
+			return neighbor_table[i].hop_num < my_hop_num;
+		}
+	}
+	return false;
+}
+
+/* Forward a packet to downstream anchors + all sensors.
+ * skip_id: sender to exclude (0 = skip none).
+ * dst_offset: byte offset of dst_device_id in the packet. */
+static void forward_downstream(void *pkt, size_t pkt_size,
+			       size_t dst_offset, uint16_t skip_id,
+			       const char *label)
+{
+	uint8_t *buf = (uint8_t *)pkt;
+
+	/* Downstream anchors only */
+	for (int i = 0; i < device_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&device_store, i, &dev_id) != 0) {
+			continue;
+		}
+		if (dev_id == skip_id || !is_downstream(dev_id)) {
+			continue;
+		}
+
+		memcpy(buf + dst_offset, &dev_id, sizeof(dev_id));
+		int err = transmit_and_wait(pkt, pkt_size);
+
+		if (err) {
+			ALL_ERR("Failed to fwd %s to ID:%d", label, dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* All paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		memcpy(buf + dst_offset, &dev_id, sizeof(dev_id));
+		int err = transmit_and_wait(pkt, pkt_size);
+
+		if (err) {
+			ALL_ERR("Failed to fwd %s to sensor ID:%d",
+				label, dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
 }
 
 /* === Mesh pairing: discover and pair with ALL valid neighbors === */
@@ -100,27 +189,7 @@ static int anchor_do_mesh_pairing(void)
 
 		k_sem_take(&operation_sem, K_FOREVER);
 
-		/* Drain all queued responses */
-		struct rx_queue_item item;
-
-		while (rx_queue_get(&item, K_NO_WAIT) == 0) {
-			if (item.len < 1) {
-				continue;
-			}
-			if (item.data[0] == PACKET_TYPE_PAIR_RESPONSE &&
-			    item.len >= PAIR_RESPONSE_PACKET_SIZE) {
-				const pair_response_packet_t *resp =
-					(const pair_response_packet_t *)item.data;
-				if (resp->dst_device_id != device_id) {
-					continue;
-				}
-				discovery_add_response(resp, item.rssi_2);
-				ALL_INF("Got pair response from %s ID:%d hop:%d RSSI:%d",
-					device_type_str(resp->device_type),
-					resp->device_id, resp->hop_num,
-					item.rssi_2 / 2);
-			}
-		}
+		drain_discovery_responses(true);
 
 		k_sleep(K_MSEC(10));
 
@@ -199,23 +268,7 @@ static int anchor_do_mesh_pairing(void)
 		}
 
 		/* Determine my hop from the best (lowest hop) neighbor */
-		const struct mesh_neighbor *best = neighbor_best_route();
-
-		my_hop_num = best->hop_num + 1;
-
-		/* Store identity in NVM (best-route neighbor as reference) */
-		node_identity_t identity = {
-			.device_id = device_id,
-			.device_type = DEVICE_TYPE_ANCHOR,
-			.parent_id = best->device_id,
-			.parent_hop = best->hop_num,
-		};
-
-		err = node_store_identity(&identity);
-		if (err) {
-			ALL_ERR("Failed to store identity, err %d", err);
-			return err;
-		}
+		recalculate_hop();
 
 		ALL_INF("Mesh pairing complete: %d neighbors, my hop:%d",
 			paired, my_hop_num);
@@ -236,23 +289,6 @@ static int anchor_do_mesh_pairing(void)
 }
 
 /* === Packet handlers (RX loop, after paired) === */
-
-static void handle_pair_request(const pair_request_packet_t *pkt, int16_t rssi_2)
-{
-	ALL_INF("Pair request from %s ID:%d (RSSI:%d)",
-		device_type_str(pkt->device_type), pkt->device_id, rssi_2 / 2);
-
-	uint32_t hash = compute_pair_hash(pkt->device_id, pkt->random_num);
-
-	int err = send_pair_response(TX_HANDLE, pkt->device_id, hash);
-	if (err) {
-		ALL_ERR("Failed to send pair response, err %d", err);
-		return;
-	}
-	k_sem_take(&operation_sem, K_FOREVER);
-
-	ALL_INF("Pair response sent to ID:%d", pkt->device_id);
-}
 
 static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 {
@@ -307,62 +343,51 @@ static void handle_data_request(const data_request_packet_t *pkt)
 		return;
 	}
 
-	const char *type_str = (pkt->request_type == DATA_REQUEST_LARGE)
-			       ? "LARGE" : "SMALL";
+	ALL_INF("DATA_REQUEST from ID:%d, forwarding downstream...",
+		pkt->src_device_id);
 
-	ALL_INF("%s DATA_REQUEST from ID:%d, forwarding...",
-		type_str, pkt->src_device_id);
+	data_request_packet_t fwd = {
+		.packet_type = PACKET_TYPE_DATA_REQUEST,
+		.src_device_id = device_id,
+		.request_type = pkt->request_type,
+	};
 
-	/* Forward to all paired devices (skip the sender) */
-	for (int i = 0; i < device_store.max_entries; i++) {
-		uint16_t dev_id;
+	forward_downstream(&fwd, sizeof(fwd),
+			   offsetof(data_request_packet_t, dst_device_id),
+			   pkt->src_device_id, "DATA_REQUEST");
+}
 
-		if (paired_store_get(&device_store, i, &dev_id) != 0) {
-			continue;
-		}
-		if (dev_id == pkt->src_device_id) {
-			continue;
-		}
+/* Send a PARENT_RESPONSE for a device back upstream */
+static void send_parent_response(uint16_t to_id, uint16_t about_id,
+				 uint8_t dev_type, uint8_t hop)
+{
+	node_identity_t id;
+	uint16_t parent_id = device_id;  /* default: this anchor is the parent */
+	uint8_t parent_type = DEVICE_TYPE_ANCHOR;
 
-		data_request_packet_t fwd = {
-			.packet_type = PACKET_TYPE_DATA_REQUEST,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.request_type = pkt->request_type,
-		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to forward DATA_REQUEST to ID:%d", dev_id);
-		} else {
-			ALL_INF("DATA_REQUEST forwarded to ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
+	/* If querying about ourselves, report our actual parent */
+	if (about_id == device_id && node_load_identity(&id) == 0) {
+		parent_id = id.parent_id;
+		parent_type = (id.parent_hop == 0)
+			? DEVICE_TYPE_GATEWAY : DEVICE_TYPE_ANCHOR;
 	}
 
-	/* Forward to all paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
+	parent_response_packet_t resp = {
+		.packet_type = PACKET_TYPE_PARENT_RESPONSE,
+		.src_device_id = about_id,
+		.dst_device_id = to_id,
+		.device_type = dev_type,
+		.parent_id = parent_id,
+		.parent_type = parent_type,
+		.hop_num = hop,
+	};
 
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
+	int err = transmit_and_wait(&resp, sizeof(resp));
 
-		data_request_packet_t fwd = {
-			.packet_type = PACKET_TYPE_DATA_REQUEST,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.request_type = pkt->request_type,
-		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to forward DATA_REQUEST to ID:%d", dev_id);
-		} else {
-			ALL_INF("DATA_REQUEST forwarded to SENSOR ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
+	if (err) {
+		ALL_ERR("Failed to send PARENT_RESPONSE for ID:%d", about_id);
 	}
+	k_sleep(K_MSEC(10));
 }
 
 static void handle_parent_query(const parent_query_packet_t *pkt)
@@ -371,39 +396,48 @@ static void handle_parent_query(const parent_query_packet_t *pkt)
 		return;
 	}
 
-	ALL_INF("PARENT_QUERY from ID:%d", pkt->src_device_id);
+	uint16_t target = pkt->target_id;
+	bool query_all = (target == 0);
 
-	/* Respond with own parent info */
-	node_identity_t id;
+	ALL_INF("PARENT_QUERY from ID:%d target:%s",
+		pkt->src_device_id,
+		query_all ? "ALL" : "specific");
 
-	if (node_load_identity(&id) == 0) {
-		uint8_t ptype = (id.parent_hop == 0)
-			? DEVICE_TYPE_GATEWAY
-			: DEVICE_TYPE_ANCHOR;
-		parent_response_packet_t resp = {
-			.packet_type = PACKET_TYPE_PARENT_RESPONSE,
-			.src_device_id = device_id,
-			.dst_device_id = pkt->src_device_id,
-			.device_type = DEVICE_TYPE_ANCHOR,
-			.parent_id = id.parent_id,
-			.parent_type = ptype,
-			.hop_num = my_hop_num,
-		};
+	/* Always respond with own parent info */
+	if (query_all || target == device_id) {
+		node_identity_t id;
 
-		int err = transmit_and_wait(&resp, sizeof(resp));
-
-		if (err) {
-			ALL_ERR("Failed to send PARENT_RESPONSE");
-		} else {
-			ALL_INF("PARENT_RESPONSE sent to ID:%d",
-				pkt->src_device_id);
+		if (node_load_identity(&id) == 0) {
+			send_parent_response(pkt->src_device_id, device_id,
+					     DEVICE_TYPE_ANCHOR, my_hop_num);
 		}
-		k_sleep(K_MSEC(10));
+		if (!query_all && target == device_id) {
+			return;  /* Found — no need to forward */
+		}
 	}
 
-	ALL_INF("Forwarding PARENT_QUERY...");
+	/* Check if the specific target is in our sensor_store */
+	if (!query_all && paired_store_contains(&sensor_store, target)) {
+		ALL_INF("SENSOR ID:%d found locally, responding", target);
+		send_parent_response(pkt->src_device_id, target,
+				     DEVICE_TYPE_SENSOR, my_hop_num);
+		return;  /* Found — no need to forward */
+	}
 
-	/* Forward to all paired devices (skip the sender) */
+	/* Check if the specific target is in our device_store (child anchor) */
+	if (!query_all && paired_store_contains(&device_store, target) &&
+	    is_downstream(target)) {
+		ALL_INF("ANCHOR ID:%d found locally, responding", target);
+		send_parent_response(pkt->src_device_id, target,
+				     DEVICE_TYPE_ANCHOR, my_hop_num + 1);
+		return;  /* Found — no need to forward */
+	}
+
+	/* Not found locally — forward query.
+	 * query_all: downstream only (hop > my_hop).
+	 * specific: peers + downstream (hop >= my_hop) so the query
+	 * can reach devices behind same-level anchors. Skip sender
+	 * and upstream to prevent loops back to gateway. */
 	for (int i = 0; i < device_store.max_entries; i++) {
 		uint16_t dev_id;
 
@@ -414,21 +448,26 @@ static void handle_parent_query(const parent_query_packet_t *pkt)
 			continue;
 		}
 
+		bool downstream_only = query_all;
+
+		if (downstream_only && !is_downstream(dev_id)) {
+			continue;
+		}
+		if (!downstream_only && is_upstream(dev_id)) {
+			continue;
+		}
+
 		parent_query_packet_t fwd = {
 			.packet_type = PACKET_TYPE_PARENT_QUERY,
 			.src_device_id = device_id,
 			.dst_device_id = dev_id,
+			.target_id = target,
 		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to forward PARENT_QUERY to ID:%d",
-				dev_id);
-		}
+		transmit_and_wait(&fwd, sizeof(fwd));
 		k_sleep(K_MSEC(10));
 	}
 
-	/* Forward to all paired sensors */
+	/* Always forward to all paired sensors */
 	for (int i = 0; i < sensor_store.max_entries; i++) {
 		uint16_t dev_id;
 
@@ -440,13 +479,9 @@ static void handle_parent_query(const parent_query_packet_t *pkt)
 			.packet_type = PACKET_TYPE_PARENT_QUERY,
 			.src_device_id = device_id,
 			.dst_device_id = dev_id,
+			.target_id = target,
 		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to forward PARENT_QUERY to sensor ID:%d",
-				dev_id);
-		}
+		transmit_and_wait(&fwd, sizeof(fwd));
 		k_sleep(K_MSEC(10));
 	}
 }
@@ -487,67 +522,20 @@ static void handle_parent_response(const parent_response_packet_t *pkt)
 	}
 }
 
-/* Broadcast REPAIR to all paired devices (skip skip_id), then factory reset.
- * skip_id: device to skip (the sender), or 0 to send to all. */
 static void send_repair_and_reset(uint16_t skip_id)
 {
-	ALL_INF("Broadcasting REPAIR to all paired devices...");
+	ALL_INF("Broadcasting REPAIR downstream...");
 
-	/* Forward to all paired devices (skip the sender) */
-	for (int i = 0; i < device_store.max_entries; i++) {
-		uint16_t dev_id;
+	repair_packet_t fwd = {
+		.packet_type = PACKET_TYPE_REPAIR,
+		.src_device_id = device_id,
+	};
 
-		if (paired_store_get(&device_store, i, &dev_id) != 0) {
-			continue;
-		}
-		if (dev_id == skip_id) {
-			continue;
-		}
+	forward_downstream(&fwd, sizeof(fwd),
+			   offsetof(repair_packet_t, dst_device_id),
+			   skip_id, "REPAIR");
 
-		repair_packet_t fwd = {
-			.packet_type = PACKET_TYPE_REPAIR,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to send REPAIR to ID:%d", dev_id);
-		} else {
-			ALL_INF("REPAIR sent to ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Forward to all paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		repair_packet_t fwd = {
-			.packet_type = PACKET_TYPE_REPAIR,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to send REPAIR to sensor ID:%d",
-				dev_id);
-		} else {
-			ALL_INF("REPAIR sent to SENSOR ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Factory reset self */
-	ALL_INF("Clearing NVM and rebooting...");
-	storage_clear_all();
-	k_sleep(K_MSEC(500));
-	sys_reboot(SYS_REBOOT_COLD);
+	factory_reset_reboot();
 }
 
 static void handle_repair(const repair_packet_t *pkt)
@@ -556,9 +544,7 @@ static void handle_repair(const repair_packet_t *pkt)
 		return;
 	}
 
-	ALL_INF("REPAIR from ID:%d, forwarding to children then resetting...",
-		pkt->src_device_id);
-
+	ALL_INF("REPAIR from ID:%d", pkt->src_device_id);
 	send_repair_and_reset(pkt->src_device_id);
 }
 
@@ -568,112 +554,31 @@ static void handle_set_rssi(const set_rssi_packet_t *pkt)
 		return;
 	}
 
-	ALL_INF("SET_RSSI %d dBm from ID:%d, forwarding to children...",
-		pkt->rssi_dbm, pkt->src_device_id);
+	ALL_INF("SET_RSSI %d dBm from ID:%d", pkt->rssi_dbm,
+		pkt->src_device_id);
 
-	/* Forward to all paired devices (skip the sender) */
-	for (int i = 0; i < device_store.max_entries; i++) {
-		uint16_t dev_id;
+	set_rssi_packet_t fwd = {
+		.packet_type = PACKET_TYPE_SET_RSSI,
+		.src_device_id = device_id,
+		.rssi_dbm = pkt->rssi_dbm,
+	};
 
-		if (paired_store_get(&device_store, i, &dev_id) != 0) {
-			continue;
-		}
-		if (dev_id == pkt->src_device_id) {
-			continue;
-		}
+	forward_downstream(&fwd, sizeof(fwd),
+			   offsetof(set_rssi_packet_t, dst_device_id),
+			   pkt->src_device_id, "SET_RSSI");
 
-		set_rssi_packet_t fwd = {
-			.packet_type = PACKET_TYPE_SET_RSSI,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.rssi_dbm = pkt->rssi_dbm,
-		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to forward SET_RSSI to ID:%d", dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Forward to all paired sensors */
-	for (int i = 0; i < sensor_store.max_entries; i++) {
-		uint16_t dev_id;
-
-		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
-			continue;
-		}
-
-		set_rssi_packet_t fwd = {
-			.packet_type = PACKET_TYPE_SET_RSSI,
-			.src_device_id = device_id,
-			.dst_device_id = dev_id,
-			.rssi_dbm = pkt->rssi_dbm,
-		};
-		int err = transmit_and_wait(&fwd, sizeof(fwd));
-
-		if (err) {
-			ALL_ERR("Failed to forward SET_RSSI to sensor ID:%d",
-				dev_id);
-		}
-		k_sleep(K_MSEC(10));
-	}
-
-	/* Store locally and reboot */
-	ALL_INF("Storing RSSI threshold %d dBm and rebooting...",
-		pkt->rssi_dbm);
-	mesh_rssi_threshold_store(pkt->rssi_dbm);
-	k_sleep(K_MSEC(500));
-	sys_reboot(SYS_REBOOT_COLD);
+	rssi_store_and_reboot(pkt->rssi_dbm);
 }
 
 static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 {
-	if (pkt->dst_device_id != device_id) {
-		return;
-	}
-
-	uint16_t payload_len = pkt->payload_len;
-
-	/* Verify CRC */
-	uint16_t rx_crc;
-	memcpy(&rx_crc, &pkt->payload[payload_len], sizeof(rx_crc));
-	uint16_t calc_crc = compute_crc16(pkt->payload, payload_len);
-	uint8_t status = (rx_crc == calc_crc) ? STATUS_SUCCESS : STATUS_CRC_FAIL;
-
-	if (status == STATUS_SUCCESS) {
-		ALL_INF("Data from ID:%d (%d bytes, RSSI:%d) CRC OK",
-			pkt->src_device_id, payload_len, rssi_2 / 2);
-	} else {
-		ALL_WRN("Data from ID:%d (%d bytes, RSSI:%d) CRC FAIL",
-			pkt->src_device_id, payload_len, rssi_2 / 2);
-	}
-
-	/* ACK back to the sender */
-	data_ack_packet_t ack = {
-		.packet_type = PACKET_TYPE_DATA_ACK,
-		.src_device_id = device_id,
-		.dst_device_id = pkt->src_device_id,
-		.hop_num = my_hop_num,
-		.status = status,
-	};
-
-	int err = transmit_and_wait(&ack, sizeof(ack));
-
-	if (err) {
-		ALL_ERR("Failed to send data ACK, err %d", err);
-		return;
-	}
-
-	ALL_INF("Data ACK sent to ID:%d (status:%s)", pkt->src_device_id,
-		status == STATUS_SUCCESS ? "OK" : "CRC_FAIL");
-
-	/* Only relay upstream if CRC was good */
+	int status = common_data_verify_and_ack(pkt, len, rssi_2);
 	if (status != STATUS_SUCCESS) {
 		return;
 	}
 
-	/* Relay data to ALL paired devices (skip the sender) */
+	/* Relay data upstream only (to neighbors with lower hop) */
+	uint16_t payload_len = pkt->payload_len;
 	uint16_t relay_len = DATA_PACKET_SIZE + payload_len + DATA_CRC_SIZE;
 	uint8_t relay_buf[DATA_LEN_MAX];
 	data_packet_t *relay = (data_packet_t *)relay_buf;
@@ -691,15 +596,16 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		if (paired_store_get(&device_store, i, &dev_id) != 0) {
 			continue;
 		}
-
-		/* Don't relay back to the sender */
 		if (dev_id == pkt->src_device_id) {
+			continue;
+		}
+		if (!is_upstream(dev_id)) {
 			continue;
 		}
 
 		relay->dst_device_id = dev_id;
 
-		err = transmit_and_wait(relay_buf, relay_len);
+		int err = transmit_and_wait(relay_buf, relay_len);
 		if (err) {
 			ALL_ERR("Failed to relay data to ID:%d, err %d",
 				dev_id, err);
@@ -707,12 +613,11 @@ static void handle_data(const data_packet_t *pkt, uint16_t len, int16_t rssi_2)
 		}
 
 		relayed++;
-		ALL_INF("Data relayed from ID:%d to ID:%d",
-			pkt->src_device_id, dev_id);
+		ALL_INF("Data relayed upstream to ID:%d", dev_id);
 	}
 
 	if (relayed == 0) {
-		ALL_WRN("No paired devices to relay data to");
+		ALL_WRN("No upstream neighbors to relay data to");
 	}
 }
 
@@ -732,7 +637,7 @@ static void process_queue(void)
 		switch (pkt_type) {
 		case PACKET_TYPE_PAIR_REQUEST:
 			if (item.len >= PAIR_REQUEST_PACKET_SIZE) {
-				handle_pair_request(
+				common_handle_pair_request(
 					(const pair_request_packet_t *)item.data,
 					item.rssi_2);
 			}
@@ -859,23 +764,7 @@ static void anchor_rediscovery(void)
 	}
 	k_sem_take(&operation_sem, K_FOREVER);
 
-	/* Drain responses */
-	struct rx_queue_item item;
-
-	while (rx_queue_get(&item, K_NO_WAIT) == 0) {
-		if (item.len < 1) {
-			continue;
-		}
-		if (item.data[0] == PACKET_TYPE_PAIR_RESPONSE &&
-		    item.len >= PAIR_RESPONSE_PACKET_SIZE) {
-			const pair_response_packet_t *resp =
-				(const pair_response_packet_t *)item.data;
-			if (resp->dst_device_id != device_id) {
-				continue;
-			}
-			discovery_add_response(resp, item.rssi_2);
-		}
-	}
+	drain_discovery_responses(false);
 
 	if (discovery_count() == 0) {
 		ALL_INF("Rediscovery: no new neighbors found");
@@ -892,17 +781,22 @@ static void anchor_rediscovery(void)
 			continue;
 		}
 
-		/* Skip already paired devices */
-		// if (paired_store_contains(&device_store, c->device_id)) {
-		// 	continue;
-		// }
-
-		/* Check if store is full */
-		if (paired_store_count(&device_store) >= device_store.max_entries) {
-			break;
+		if (c->hash != expected_hash) {
+			continue;
 		}
 
-		if (c->hash != expected_hash) {
+		/* Already paired: just update neighbor hop/RSSI */
+		if (paired_store_contains(&device_store, c->device_id)) {
+			neighbor_add(c->device_id, c->device_type,
+				     c->hop_num, c->rssi_2);
+			ALL_INF("Rediscovery: updated neighbor %s ID:%d (hop:%d, RSSI:%d)",
+				device_type_str(c->device_type),
+				c->device_id, c->hop_num, c->rssi_2 / 2);
+			continue;
+		}
+
+		/* Check if store is full for new devices */
+		if (paired_store_count(&device_store) >= device_store.max_entries) {
 			continue;
 		}
 
@@ -929,6 +823,9 @@ static void anchor_rediscovery(void)
 	ALL_INF("Rediscovery: %d new neighbors paired (%d/%d slots used)",
 		new_paired, paired_store_count(&device_store),
 		device_store.max_entries);
+
+	/* Recalculate hop from all neighbors (including newly discovered) */
+	recalculate_hop();
 }
 
 /* === Anchor entry point === */

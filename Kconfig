@@ -87,6 +87,10 @@ config PSRAM_LOG_LEVEL
 	int "PSRAM log level"
 	default 1
 
+config COMMON_LOG_LEVEL
+	int "Common log level"
+	default 1
+
 config QUEUE_LOG_LEVEL
 	int "Queue log level"
 	default 1

@@ -23,10 +23,10 @@
 #include "../large_data.h"
 #include "../nvs_store.h"
 #include "../log_all.h"
+#include "../common.h"
 
 LOG_MODULE_REGISTER(sensor, CONFIG_SENSOR_LOG_LEVEL);
 
-#define TX_HANDLE 1
 #define RX_HANDLE 2
 
 #define PAIR_RETRY_MAX     5
@@ -64,27 +64,7 @@ static int sensor_do_pairing(void)
 
 		k_sem_take(&operation_sem, K_FOREVER);
 
-		/* Drain all queued responses */
-		struct rx_queue_item item;
-
-		while (rx_queue_get(&item, K_NO_WAIT) == 0) {
-			if (item.len < 1) {
-				continue;
-			}
-
-			if (item.data[0] == PACKET_TYPE_PAIR_RESPONSE &&
-			    item.len >= PAIR_RESPONSE_PACKET_SIZE) {
-				const pair_response_packet_t *resp =
-					(const pair_response_packet_t *)item.data;
-				if (resp->dst_device_id != device_id) {
-					continue;
-				}
-				discovery_add_response(resp, item.rssi_2);
-				ALL_INF("Got pair response from %s ID:%d hop:%d",
-					device_type_str(resp->device_type),
-					resp->device_id, resp->hop_num);
-			}
-		}
+		drain_discovery_responses(true);
 
 		k_sleep(K_MSEC(10));
 
@@ -137,19 +117,6 @@ static int sensor_do_pairing(void)
 
 	ALL_ERR("Pairing failed after %d attempts", PAIR_RETRY_MAX);
 	return -ETIMEDOUT;
-}
-
-/* === TX helper: transmit and wait for completion === */
-
-static int transmit_and_wait(void *data, size_t len)
-{
-	int err = transmit(TX_HANDLE, data, len);
-
-	if (err) {
-		return err;
-	}
-	k_sem_take(&operation_sem, K_FOREVER);
-	return 0;
 }
 
 /* === Data transfer: send data to parent, check for ACK === */
@@ -344,9 +311,7 @@ void sensor_main(void)
 						"clearing NVM and "
 						"rebooting...",
 						rpkt->src_device_id);
-					storage_clear_all();
-					k_sleep(K_MSEC(500));
-					sys_reboot(SYS_REBOOT_COLD);
+					factory_reset_reboot();
 				}
 			}
 
@@ -361,10 +326,7 @@ void sensor_main(void)
 						"rebooting...",
 						spkt->rssi_dbm,
 						spkt->src_device_id);
-					mesh_rssi_threshold_store(
-						spkt->rssi_dbm);
-					k_sleep(K_MSEC(500));
-					sys_reboot(SYS_REBOOT_COLD);
+					rssi_store_and_reboot(spkt->rssi_dbm);
 				}
 			}
 
@@ -373,7 +335,9 @@ void sensor_main(void)
 				const parent_query_packet_t *qry =
 					(const parent_query_packet_t *)
 						item.data;
-				if (qry->dst_device_id == device_id) {
+				if (qry->dst_device_id == device_id &&
+				    (qry->target_id == 0 ||
+				     qry->target_id == device_id)) {
 					node_identity_t id;
 
 					ALL_INF("PARENT_QUERY from ID:%d",
@@ -390,16 +354,13 @@ void sensor_main(void)
 							.device_type = DEVICE_TYPE_SENSOR,
 							.parent_id = id.parent_id,
 							.parent_type = ptype,
-							.hop_num = my_hop_num,
+							.hop_num = id.parent_hop,
 						};
 
 						int perr = transmit_and_wait(
 							&resp, sizeof(resp));
 						if (perr) {
 							ALL_ERR("Failed to send PARENT_RESPONSE");
-						} else {
-							ALL_INF("PARENT_RESPONSE sent to ID:%d",
-								qry->src_device_id);
 						}
 					}
 				}

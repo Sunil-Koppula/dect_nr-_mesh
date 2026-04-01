@@ -26,6 +26,7 @@
 #include "protocol.h"
 #include "nvs_store.h"
 #include "mesh.h"
+#include "common.h"
 
 /* Paired store pointers — set at runtime by gateway/anchor main.
  * NULL on sensor (no children). */
@@ -42,6 +43,7 @@ uint16_t parent_query_sensor_id;
 
 /* AT+SENSOR_ALL / AT+ANCHOR_ALL — parent query for all devices */
 K_SEM_DEFINE(parent_query_all_sem, 0, 1);
+uint8_t parent_query_all_filter;  /* DEVICE_TYPE_SENSOR or DEVICE_TYPE_ANCHOR */
 
 /* AT+REPAIR — broadcast factory reset to all paired devices */
 K_SEM_DEFINE(repair_sem, 0, 1);
@@ -167,11 +169,8 @@ static void cmd_factory_reset(void)
 	}
 
 	/* Sensor: local-only reset */
-	printk("+FACTORY_RESET: clearing NVM...\r\n");
-	storage_clear_all();
-	printk("+FACTORY_RESET: rebooting...\r\n");
-	k_sleep(K_MSEC(500));
-	sys_reboot(SYS_REBOOT_COLD);
+	printk("+FACTORY_RESET: clearing NVM and rebooting...\r\n");
+	factory_reset_reboot();
 }
 
 static void cmd_reset(void)
@@ -272,6 +271,35 @@ static const struct {
 
 #define AT_CMD_COUNT (sizeof(at_commands) / sizeof(at_commands[0]))
 
+/* ===== Device query helper ===== */
+
+static bool handle_device_query_cmd(const char *cmd_part, const char *prefix,
+				    const char *label, uint8_t filter)
+{
+	size_t plen = strlen(prefix);
+	if (strncmp(cmd_part, prefix, plen) != 0) {
+		return false;
+	}
+	const char *suffix = cmd_part + plen;
+	if (my_device_type != DEVICE_TYPE_GATEWAY) {
+		printk("+%s: only available on gateway\r\n", label);
+		printk("ERROR\r\n");
+	} else if (strcmp(suffix, "ALL") == 0) {
+		printk("+%s_ALL: querying parent of all...\r\n", label);
+		parent_query_all_filter = filter;
+		k_sem_give(&parent_query_all_sem);
+		printk("OK\r\n");
+	} else if (*suffix == '\0') {
+		printk("ERROR: missing %s ID\r\n", label);
+	} else {
+		parent_query_sensor_id = (uint16_t)atoi(suffix);
+		printk("+%s: querying parent of ID:%d...\r\n", label, parent_query_sensor_id);
+		k_sem_give(&parent_query_sem);
+		printk("OK\r\n");
+	}
+	return true;
+}
+
 /* ===== Console getline thread ===== */
 
 static void at_cmd_thread_entry(void *p1, void *p2, void *p3)
@@ -312,51 +340,8 @@ static void at_cmd_thread_entry(void *p1, void *p2, void *p3)
 			}
 		}
 
-		/* Check for AT+SENSOR_ALL / AT+SENSOR_<ID> */
-		if (!found && strncmp(cmd_part, "+SENSOR_", 8) == 0) {
-			const char *suffix = cmd_part + 8;
-
-			if (my_device_type != DEVICE_TYPE_GATEWAY) {
-				printk("+SENSOR: only available on gateway\r\n");
-				printk("ERROR\r\n");
-			} else if (strcmp(suffix, "ALL") == 0) {
-				printk("+SENSOR_ALL: querying parent of all sensors...\r\n");
-				k_sem_give(&parent_query_all_sem);
-				printk("OK\r\n");
-			} else if (*suffix == '\0') {
-				printk("ERROR: missing sensor ID\r\n");
-			} else {
-				parent_query_sensor_id = (uint16_t)atoi(suffix);
-				printk("+SENSOR: querying parent of sensor ID:%d...\r\n",
-				       parent_query_sensor_id);
-				k_sem_give(&parent_query_sem);
-				printk("OK\r\n");
-			}
-			found = true;
-		}
-
-		/* Check for AT+ANCHOR_ALL / AT+ANCHOR_<ID> */
-		if (!found && strncmp(cmd_part, "+ANCHOR_", 8) == 0) {
-			const char *suffix = cmd_part + 8;
-
-			if (my_device_type != DEVICE_TYPE_GATEWAY) {
-				printk("+ANCHOR: only available on gateway\r\n");
-				printk("ERROR\r\n");
-			} else if (strcmp(suffix, "ALL") == 0) {
-				printk("+ANCHOR_ALL: querying parent of all anchors...\r\n");
-				k_sem_give(&parent_query_all_sem);
-				printk("OK\r\n");
-			} else if (*suffix == '\0') {
-				printk("ERROR: missing anchor ID\r\n");
-			} else {
-				parent_query_sensor_id = (uint16_t)atoi(suffix);
-				printk("+ANCHOR: querying parent of anchor ID:%d...\r\n",
-				       parent_query_sensor_id);
-				k_sem_give(&parent_query_sem);
-				printk("OK\r\n");
-			}
-			found = true;
-		}
+		if (!found) found = handle_device_query_cmd(cmd_part, "+SENSOR_", "SENSOR", DEVICE_TYPE_SENSOR);
+		if (!found) found = handle_device_query_cmd(cmd_part, "+ANCHOR_", "ANCHOR", DEVICE_TYPE_ANCHOR);
 
 		/* Check for AT+SET_RSSI_<dBm> */
 		if (!found && strncmp(cmd_part, "+SET_RSSI_", 10) == 0) {

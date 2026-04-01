@@ -7,6 +7,7 @@ import sys
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QTextEdit, QSplitter, QGroupBox, QFrame,
+    QLineEdit, QInputDialog,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
@@ -192,9 +193,61 @@ class MainWindow(QMainWindow):
             btn_clear.styleSheet() +
             "QPushButton { background-color: #6a2a2a; }")
 
+        # --- AT command buttons ---
+        btn_sensor_all = QPushButton("AT+SENSOR_ALL")
+        btn_sensor_all.clicked.connect(self._at_sensor_all)
+        btn_sensor_all.setStyleSheet(
+            btn_sensor_all.styleSheet() +
+            "QPushButton { background-color: #2a5a5a; }")
+
+        btn_anchor_all = QPushButton("AT+ANCHOR_ALL")
+        btn_anchor_all.clicked.connect(self._at_anchor_all)
+        btn_anchor_all.setStyleSheet(
+            btn_anchor_all.styleSheet() +
+            "QPushButton { background-color: #2a5a5a; }")
+
+        btn_repair = QPushButton("AT+REPAIR")
+        btn_repair.clicked.connect(self._at_repair)
+        btn_repair.setStyleSheet(
+            btn_repair.styleSheet() +
+            "QPushButton { background-color: #6a3a2a; }")
+
+        btn_set_rssi = QPushButton("AT+SET_RSSI")
+        btn_set_rssi.clicked.connect(self._at_set_rssi)
+        btn_set_rssi.setStyleSheet(
+            btn_set_rssi.styleSheet() +
+            "QPushButton { background-color: #4a3a6a; }")
+
         for btn in [btn_gw, btn_anchor, btn_sensor, btn_pair_all,
-                     btn_unpair_all, btn_send_data, btn_randomize, btn_clear]:
+                     btn_unpair_all, btn_send_data, btn_randomize, btn_clear,
+                     btn_sensor_all, btn_anchor_all, btn_repair, btn_set_rssi]:
             toolbar_layout.addWidget(btn)
+
+        # --- Manual AT command input ---
+        self.at_input = QLineEdit()
+        self.at_input.setPlaceholderText("AT+SENSOR_12345")
+        self.at_input.setFixedWidth(180)
+        self.at_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #1a1a2e;
+                color: #ccc;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-family: Consolas;
+                font-size: 11px;
+            }
+        """)
+        self.at_input.returnPressed.connect(self._at_manual_command)
+
+        btn_at_send = QPushButton("AT>")
+        btn_at_send.clicked.connect(self._at_manual_command)
+        btn_at_send.setStyleSheet(
+            btn_at_send.styleSheet() +
+            "QPushButton { background-color: #3a5a3a; }")
+
+        toolbar_layout.addWidget(self.at_input)
+        toolbar_layout.addWidget(btn_at_send)
         toolbar_layout.addStretch()
 
         # Layout
@@ -301,6 +354,70 @@ class MainWindow(QMainWindow):
         self.canvas.selected_node = None
         self.info_panel.update_info(None)
         self.canvas.update()
+
+    def _at_sensor_all(self):
+        steps = self.mesh.simulate_parent_query_all(DeviceType.SENSOR)
+        self.canvas.queue_animation_steps(steps)
+
+    def _at_anchor_all(self):
+        steps = self.mesh.simulate_parent_query_all(DeviceType.ANCHOR)
+        self.canvas.queue_animation_steps(steps)
+
+    def _at_repair(self):
+        steps = self.mesh.simulate_repair()
+        self.canvas.queue_animation_steps(steps)
+        self.canvas.update()
+
+    def _at_set_rssi(self):
+        value, ok = QInputDialog.getInt(
+            self, "Set RSSI Threshold",
+            "RSSI threshold (dBm):", self.mesh.rssi_threshold, -120, 0)
+        if ok:
+            steps = self.mesh.simulate_set_rssi(value)
+            self.canvas.queue_animation_steps(steps)
+
+    def _at_manual_command(self):
+        """Parse a manual AT command from the text input."""
+        cmd = self.at_input.text().strip().upper()
+        self.at_input.clear()
+        if not cmd:
+            return
+
+        self.mesh._log(f"AT command: {cmd}")
+
+        if cmd == "AT+SENSOR_ALL":
+            self._at_sensor_all()
+        elif cmd == "AT+ANCHOR_ALL":
+            self._at_anchor_all()
+        elif cmd == "AT+REPAIR":
+            self._at_repair()
+        elif cmd == "AT+GET_RSSI?":
+            self.mesh._log(f"RSSI threshold: {self.mesh.rssi_threshold} dBm")
+        elif cmd.startswith("AT+SET_RSSI="):
+            try:
+                val = int(cmd.split("=", 1)[1])
+                steps = self.mesh.simulate_set_rssi(val)
+                self.canvas.queue_animation_steps(steps)
+            except ValueError:
+                self.mesh._log("Invalid RSSI value", "ERR")
+        elif cmd.startswith("AT+SENSOR_"):
+            # AT+SENSOR_12345 — query specific sensor
+            try:
+                target_id = int(cmd.split("_", 1)[1])
+                steps = self.mesh.simulate_parent_query(target_id)
+                self.canvas.queue_animation_steps(steps)
+            except ValueError:
+                self.mesh._log("Invalid device ID", "ERR")
+        elif cmd.startswith("AT+ANCHOR_"):
+            # AT+ANCHOR_12345 — query specific anchor
+            try:
+                target_id = int(cmd.split("_", 1)[1])
+                steps = self.mesh.simulate_parent_query(target_id)
+                self.canvas.queue_animation_steps(steps)
+            except ValueError:
+                self.mesh._log("Invalid device ID", "ERR")
+        else:
+            self.mesh._log(f"Unknown AT command: {cmd}", "WRN")
 
     def _on_node_selected(self, node):
         self.info_panel.update_info(node)

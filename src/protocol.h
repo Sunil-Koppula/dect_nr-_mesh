@@ -211,11 +211,13 @@ typedef struct {
 #define LARGE_DATA_NACK_MAX_FRAGS \
 	((DATA_LEN_MAX - LARGE_DATA_NACK_PACKET_SIZE) / sizeof(uint16_t))
 
-/* Parent Query — gateway asks sensor to report its parent (relayed by anchors) */
+/* Parent Query — gateway asks a device to report its parent (relayed by anchors).
+ * target_id: specific device to query, or 0 for all devices. */
 typedef struct {
 	uint8_t packet_type;        /* PACKET_TYPE_PARENT_QUERY */
 	uint16_t src_device_id;     /* originator (gateway) */
-	uint16_t dst_device_id;     /* target sensor */
+	uint16_t dst_device_id;     /* next-hop recipient */
+	uint16_t target_id;         /* 0 = query all, else specific device ID */
 } __attribute__((packed)) parent_query_packet_t;
 
 #define PARENT_QUERY_PACKET_SIZE sizeof(parent_query_packet_t)

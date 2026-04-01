@@ -7,17 +7,22 @@ Gateway (gateway.c):
   - Responds to pair requests from anchors/sensors
   - handle_pair_confirm: stores anchors in anchor_store, sensors in sensor_store
   - handle_data: ACK back, no relay (gateway is final destination)
+  - AT commands: PARENT_QUERY, REPAIR, SET_RSSI dispatched from gateway
 
 Anchor (anchor.c):
   - True mesh — pairs with ALL reachable gateways/anchors (device_store, max 8)
   - Paired sensors stored in sensor_store (max 16)
   - anchor_do_mesh_pairing: broadcast pair_request, collect responses,
-    discovery_sort_mesh (gateway/min-hop first, filter RSSI > -75 dBm),
+    discovery_sort_mesh (gateway/min-hop first, filter RSSI > threshold),
     send pair_confirm to ALL valid, store in device_store
   - handle_pair_confirm: gateway/anchor -> device_store + neighbor_add;
     sensor -> sensor_store
-  - handle_data: ACK sender, relay to ALL devices in device_store (skip sender)
-  - Rediscovery: every 10 min until device_store full (8 slots)
+  - handle_data: ACK sender, relay UPSTREAM only (devices with lower hop)
+  - handle_parent_query: respond with own info, forward downstream
+  - handle_repair: forward downstream, then factory reset
+  - handle_set_rssi: forward downstream, store new threshold
+  - Rediscovery: every 10 min until device_store full (8 slots);
+    also updates hop numbers of already-paired devices
 
 Sensor (sensor.c):
   - Tree topology — picks ONE best parent (gateway > lowest hop > best RSSI)
@@ -25,7 +30,7 @@ Sensor (sensor.c):
 
 Mesh (mesh.c):
   - discovery_sort_mesh: sort by gateway first, then min hop, then best RSSI;
-    filter anchors below -75 dBm
+    filter anchors below rssi_threshold (mutable, default -75 dBm)
   - discovery_best: gateway wins > lower hop > better RSSI (used by sensor)
   - neighbor_best_route: gateway wins > lower hop > better RSSI
   - discovery_add_response: reject sensors as candidates for anchors/sensors
@@ -37,8 +42,9 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable
 
 from packet import (
-    DeviceType, Version, PairRequest, PairResponse, PairConfirm,
+    DeviceType, PacketType, Version, PairRequest, PairResponse, PairConfirm,
     DataPacket, DataAck,
+    ParentQuery, ParentResponse, RepairPacket, SetRssiPacket,
     compute_pair_hash, device_type_str,
     STATUS_SUCCESS, STATUS_CRC_FAIL,
 )
@@ -166,6 +172,14 @@ class Node:
             return True
         return False
 
+    def is_upstream_of(self, other_node) -> bool:
+        """True if this node's hop < other_node's hop (upstream)."""
+        return self.hop < other_node.hop
+
+    def is_downstream_of(self, other_node) -> bool:
+        """True if this node's hop > other_node's hop (downstream)."""
+        return self.hop > other_node.hop
+
     def __str__(self):
         return (f"{device_type_str(self.device_type)} "
                 f"ID:{self.device_id} v{self.version} hop:{self.hop}")
@@ -191,6 +205,7 @@ class MeshNetwork:
         self.start_time = time.time()
         self.on_log: Optional[Callable] = None
         self.on_topology_changed: Optional[Callable] = None
+        self.rssi_threshold: int = RSSI_THRESHOLD
 
     def _log(self, msg: str, level: str = "INF"):
         entry = LogEntry(time.time() - self.start_time, msg, level)
@@ -322,7 +337,7 @@ class MeshNetwork:
     def _discovery_sort_mesh(self, candidates):
         """Mirrors discovery_sort_mesh in mesh.c.
         Sort: gateway first > min hop > best RSSI.
-        Filter: discard anchors below RSSI_THRESHOLD."""
+        Filter: discard anchors below rssi_threshold."""
         # Sort
         candidates.sort(key=lambda c: (
             0 if c[0].is_gateway else 1,
@@ -334,7 +349,7 @@ class MeshNetwork:
         for node, rssi in candidates:
             if node.is_gateway:
                 valid.append((node, rssi))
-            elif rssi >= RSSI_THRESHOLD:
+            elif rssi >= self.rssi_threshold:
                 valid.append((node, rssi))
         return valid
 
@@ -440,7 +455,7 @@ class MeshNetwork:
             rssi = calc_rssi(anchor.x, anchor.y, n.x, n.y)
             self._discovery_add_response(candidates, anchor, n, rssi)
 
-            if not n.is_gateway and rssi < RSSI_THRESHOLD:
+            if not n.is_gateway and rssi < self.rssi_threshold:
                 candidates = [(nn, r) for nn, r in candidates if nn.device_id != n.device_id]
                 self._log(f"ID:{n.device_id} RSSI too weak ({rssi} dBm)", "WRN")
                 continue
@@ -508,10 +523,8 @@ class MeshNetwork:
     # ========== Anchor rediscovery (anchor.c:450-553) ==========
 
     def _anchor_rediscovery(self, anchor) -> list:
-        """Mirrors anchor_rediscovery — single attempt, skip already paired."""
-        if anchor.device_store_full:
-            return []
-
+        """Mirrors anchor_rediscovery — single attempt, skip already paired.
+        Also updates hop numbers of already-paired devices that respond."""
         animation_steps = []
         rand_num = random.randint(0, 0xFFFFFFFF)
         expected_hash = compute_pair_hash(anchor.device_id, rand_num)
@@ -530,14 +543,24 @@ class MeshNetwork:
         for n in self.get_nodes_in_range(anchor):
             if not n.can_accept_children:
                 continue
-            if anchor.device_store_contains(n.device_id):
-                continue
             if packet_lost(anchor.x, anchor.y, n.x, n.y):
                 continue
             rssi = calc_rssi(anchor.x, anchor.y, n.x, n.y)
-            if not n.is_gateway and rssi < RSSI_THRESHOLD:
+            if not n.is_gateway and rssi < self.rssi_threshold:
+                continue
+            # Update hop numbers for already-paired devices
+            if anchor.device_store_contains(n.device_id):
+                for d in anchor.paired_devices:
+                    if d.device_id == n.device_id:
+                        d.version = n.version
+                        break
+                self._log(f"Rediscovery: updated neighbor ID:{n.device_id} "
+                          f"hop:{n.hop}")
                 continue
             self._discovery_add_response(candidates, anchor, n, rssi)
+
+        if anchor.device_store_full:
+            return animation_steps
 
         valid = self._discovery_sort_mesh(candidates)
         for peer_node, rssi in valid:
@@ -722,9 +745,9 @@ class MeshNetwork:
     # ========== Data send/relay (matches firmware exactly) ==========
 
     def _anchor_handle_data(self, anchor, sender_id, animation_steps, visited):
-        """Mirrors anchor.c handle_data: ACK sender, relay to ALL paired
-        devices (skip sender). Each receiving anchor also runs handle_data
-        (mesh flood with visited set to prevent loops)."""
+        """Relay data UPSTREAM only (to devices with lower hop).
+        Each receiving anchor also runs handle_data with visited set
+        to prevent loops."""
         for dev in anchor.paired_devices:
             if dev.device_id == sender_id:
                 continue  # don't relay back to sender
@@ -732,6 +755,9 @@ class MeshNetwork:
                 continue  # already received this data
             relay_node = self.find_node(dev.device_id)
             if not relay_node:
+                continue
+            # Only relay upstream
+            if relay_node.hop >= anchor.hop:
                 continue
 
             visited.add(dev.device_id)
@@ -746,7 +772,7 @@ class MeshNetwork:
             })
 
             # If relay target is an anchor, it also runs handle_data
-            # (relay to ALL its paired devices, skip the sender)
+            # (relay upstream, skip the sender)
             if relay_node.is_anchor:
                 self._anchor_handle_data(relay_node, anchor.device_id,
                                          animation_steps, visited)
@@ -787,8 +813,7 @@ class MeshNetwork:
             "delay": 1000,
         })
 
-        # Anchor: relay to ALL paired devices, each anchor continues the flood
-        # Gateway: ACK only, no relay (final destination)
+        # Anchor: relay upstream only; Gateway: ACK only (final destination)
         if parent.is_anchor:
             # Track visited nodes to prevent infinite loops in mesh
             visited = {sensor.device_id, parent.device_id}
@@ -796,3 +821,578 @@ class MeshNetwork:
                                      animation_steps, visited)
 
         return animation_steps
+
+    # ========== Downstream forwarding helper ==========
+
+    def _forward_downstream(self, anchor, sender_id, packet_factory, label,
+                            animation_steps):
+        """Forward a packet to downstream anchors (hop > my_hop) + all sensors."""
+        for dev in anchor.paired_devices:
+            if dev.device_id == sender_id:
+                continue
+            peer = self.find_node(dev.device_id)
+            if not peer or peer.hop <= anchor.hop:
+                continue  # skip upstream and same-level peers
+            pkt = packet_factory(dev.device_id)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+        for dev in anchor.paired_sensors:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = packet_factory(dev.device_id)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+
+    # ========== Neighbor best route (mirrors mesh.c) ==========
+
+    def _neighbor_best_route(self, anchor):
+        """Return the best upstream neighbor: gateway > lower hop > better RSSI."""
+        best = None
+        best_rssi = -999
+        for dev in anchor.paired_devices:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            if not peer.is_upstream_of(anchor):
+                continue
+            rssi = calc_rssi(anchor.x, anchor.y, peer.x, peer.y)
+            if best is None:
+                best, best_rssi = peer, rssi
+                continue
+            if peer.is_gateway and not best.is_gateway:
+                best, best_rssi = peer, rssi
+                continue
+            if best.is_gateway and not peer.is_gateway:
+                continue
+            if peer.hop < best.hop:
+                best, best_rssi = peer, rssi
+                continue
+            if peer.hop == best.hop and rssi > best_rssi:
+                best, best_rssi = peer, rssi
+        return best
+
+    # ========== Parent Query (AT+SENSOR_*, AT+ANCHOR_*) ==========
+
+    def simulate_parent_query(self, target_id: int) -> list:
+        """Query parent info for a specific device or all devices.
+        If target_id != 0: specific query.  If target_id == 0: query all."""
+        gateway = None
+        for n in self.nodes:
+            if n.is_gateway:
+                gateway = n
+                break
+        if not gateway:
+            self._log("No gateway found", "ERR")
+            return []
+
+        animation_steps = []
+        seen_ids = set()
+
+        if target_id != 0:
+            # Check gateway's sensor_store first
+            for dev in gateway.paired_sensors:
+                if dev.device_id == target_id:
+                    self._log(f"Parent query: SENSOR ID:{target_id} -> "
+                              f"parent GATEWAY ID:{gateway.device_id} hop:1")
+                    return []
+            # Check gateway's anchor_store (device_store)
+            for dev in gateway.paired_devices:
+                if dev.device_id == target_id:
+                    self._log(f"Parent query: ANCHOR ID:{target_id} -> "
+                              f"parent GATEWAY ID:{gateway.device_id} hop:1")
+                    return []
+
+        # Send PARENT_QUERY to all paired anchors
+        for dev in gateway.paired_devices:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = ParentQuery(src_device_id=gateway.device_id,
+                              dst_device_id=dev.device_id,
+                              target_id=target_id)
+            animation_steps.append({
+                "type": "unicast", "src": gateway, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._anchor_handle_parent_query(
+                peer, gateway.device_id, target_id, animation_steps, seen_ids)
+
+        if target_id == 0:
+            # Also query directly paired sensors
+            for dev in gateway.paired_sensors:
+                peer = self.find_node(dev.device_id)
+                if not peer:
+                    continue
+                resp = ParentResponse(
+                    src_device_id=peer.device_id,
+                    dst_device_id=gateway.device_id,
+                    device_type=peer.device_type,
+                    parent_id=peer.parent_id or 0,
+                    parent_type=DeviceType.GATEWAY,
+                    hop_num=peer.hop,
+                )
+                animation_steps.append({
+                    "type": "unicast", "src": peer, "dst": gateway,
+                    "packet": resp, "delay": 300,
+                })
+                self._log(f"Parent response: SENSOR ID:{peer.device_id} -> "
+                          f"parent GATEWAY ID:{gateway.device_id} hop:{peer.hop}")
+
+        return animation_steps
+
+    def simulate_parent_query_all(self, filter_type: int) -> list:
+        """Query all devices of a given type (DeviceType.SENSOR or ANCHOR).
+        Equivalent to AT+SENSOR_ALL / AT+ANCHOR_ALL."""
+        gateway = None
+        for n in self.nodes:
+            if n.is_gateway:
+                gateway = n
+                break
+        if not gateway:
+            self._log("No gateway found", "ERR")
+            return []
+
+        type_str = "SENSOR" if filter_type == DeviceType.SENSOR else "ANCHOR"
+        self._log(f"AT+{type_str}_ALL: querying all {type_str.lower()}s")
+
+        animation_steps = []
+        seen_ids = set()
+
+        # Gateway logs its own directly paired devices of the filter type
+        if filter_type == DeviceType.SENSOR:
+            for dev in gateway.paired_sensors:
+                peer = self.find_node(dev.device_id)
+                if peer:
+                    self._log(f"  {type_str} ID:{peer.device_id} -> "
+                              f"parent GATEWAY ID:{gateway.device_id} "
+                              f"hop:{peer.hop}")
+                    seen_ids.add(peer.device_id)
+        elif filter_type == DeviceType.ANCHOR:
+            for dev in gateway.paired_devices:
+                peer = self.find_node(dev.device_id)
+                if peer and peer.is_anchor:
+                    self._log(f"  {type_str} ID:{peer.device_id} -> "
+                              f"parent GATEWAY ID:{gateway.device_id} "
+                              f"hop:{peer.hop}")
+                    seen_ids.add(peer.device_id)
+
+        # Send PARENT_QUERY (target_id=0) to all paired anchors
+        for dev in gateway.paired_devices:
+            peer = self.find_node(dev.device_id)
+            if not peer or not peer.is_anchor:
+                continue
+            pkt = ParentQuery(src_device_id=gateway.device_id,
+                              dst_device_id=dev.device_id,
+                              target_id=0)
+            animation_steps.append({
+                "type": "unicast", "src": gateway, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._anchor_handle_parent_query_all(
+                peer, gateway.device_id, filter_type, animation_steps, seen_ids)
+
+        return animation_steps
+
+    def _anchor_handle_parent_query(self, anchor, sender_id, target_id,
+                                    animation_steps, seen_ids):
+        """Anchor handles PARENT_QUERY: respond if match, forward downstream."""
+        if anchor.device_id in seen_ids:
+            return
+        seen_ids.add(anchor.device_id)
+
+        # Find best upstream route for responses
+        upstream = self._neighbor_best_route(anchor)
+        if not upstream:
+            upstream = self.find_node(sender_id)
+
+        if target_id != 0:
+            # Specific target query
+            if anchor.device_id == target_id:
+                # Respond with own info
+                parent_node = self._neighbor_best_route(anchor)
+                parent_id = parent_node.device_id if parent_node else 0
+                parent_type = parent_node.device_type if parent_node else DeviceType.UNKNOWN
+                resp = ParentResponse(
+                    src_device_id=anchor.device_id,
+                    dst_device_id=sender_id,
+                    device_type=anchor.device_type,
+                    parent_id=parent_id,
+                    parent_type=parent_type,
+                    hop_num=anchor.hop,
+                )
+                if upstream:
+                    animation_steps.append({
+                        "type": "unicast", "src": anchor, "dst": upstream,
+                        "packet": resp, "delay": 300,
+                    })
+                self._log(f"Parent response: ANCHOR ID:{anchor.device_id} -> "
+                          f"parent {device_type_str(parent_type)} "
+                          f"ID:{parent_id} hop:{anchor.hop}")
+                return
+
+            # Check local sensor_store
+            for dev in anchor.paired_sensors:
+                if dev.device_id == target_id:
+                    peer = self.find_node(dev.device_id)
+                    hop = peer.hop if peer else anchor.hop + 1
+                    resp = ParentResponse(
+                        src_device_id=dev.device_id,
+                        dst_device_id=sender_id,
+                        device_type=DeviceType.SENSOR,
+                        parent_id=anchor.device_id,
+                        parent_type=anchor.device_type,
+                        hop_num=hop,
+                    )
+                    if upstream:
+                        animation_steps.append({
+                            "type": "unicast", "src": anchor, "dst": upstream,
+                            "packet": resp, "delay": 300,
+                        })
+                    self._log(f"Parent response: SENSOR ID:{dev.device_id} -> "
+                              f"parent ANCHOR ID:{anchor.device_id} hop:{hop}")
+                    return
+
+            # Check downstream device_store
+            for dev in anchor.paired_devices:
+                if dev.device_id == target_id:
+                    peer = self.find_node(dev.device_id)
+                    if peer and peer.is_downstream_of(anchor):
+                        p_node = self._neighbor_best_route(peer) if peer else None
+                        p_id = p_node.device_id if p_node else anchor.device_id
+                        p_type = p_node.device_type if p_node else anchor.device_type
+                        resp = ParentResponse(
+                            src_device_id=dev.device_id,
+                            dst_device_id=sender_id,
+                            device_type=dev.device_type,
+                            parent_id=p_id,
+                            parent_type=p_type,
+                            hop_num=peer.hop if peer else 0,
+                        )
+                        if upstream:
+                            animation_steps.append({
+                                "type": "unicast", "src": anchor, "dst": upstream,
+                                "packet": resp, "delay": 300,
+                            })
+                        self._log(f"Parent response: ANCHOR ID:{dev.device_id} -> "
+                                  f"parent {device_type_str(p_type)} "
+                                  f"ID:{p_id} hop:{peer.hop if peer else 0}")
+                        return
+
+        # Not found locally — forward query.
+        # query_all: downstream only (hop > my_hop).
+        # specific: peers + downstream (hop >= my_hop) to reach devices
+        # behind same-level anchors. Skip sender and upstream.
+        for dev in anchor.paired_devices:
+            if dev.device_id == sender_id:
+                continue
+            peer = self.find_node(dev.device_id)
+            if not peer or not peer.is_anchor:
+                continue
+            if target_id != 0:
+                # Specific: skip upstream only (allow peers + downstream)
+                if peer.is_upstream_of(anchor):
+                    continue
+            else:
+                # Query all: downstream only
+                if peer.hop <= anchor.hop:
+                    continue
+            pkt = ParentQuery(src_device_id=anchor.device_id,
+                              dst_device_id=dev.device_id,
+                              target_id=target_id)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._anchor_handle_parent_query(
+                peer, anchor.device_id, target_id, animation_steps, seen_ids)
+
+        # Always forward to all paired sensors
+        for dev in anchor.paired_sensors:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = ParentQuery(src_device_id=anchor.device_id,
+                              dst_device_id=dev.device_id,
+                              target_id=target_id)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+
+    def _anchor_handle_parent_query_all(self, anchor, sender_id, filter_type,
+                                        animation_steps, seen_ids):
+        """Handle query-all: report own info + sensors, forward downstream."""
+        if anchor.device_id in seen_ids:
+            return
+        seen_ids.add(anchor.device_id)
+
+        upstream = self._neighbor_best_route(anchor)
+        if not upstream:
+            upstream = self.find_node(sender_id)
+
+        type_str = "SENSOR" if filter_type == DeviceType.SENSOR else "ANCHOR"
+
+        # Report own info if matching filter
+        if filter_type == DeviceType.ANCHOR:
+            parent_node = self._neighbor_best_route(anchor)
+            parent_id = parent_node.device_id if parent_node else 0
+            parent_type = parent_node.device_type if parent_node else DeviceType.UNKNOWN
+            resp = ParentResponse(
+                src_device_id=anchor.device_id,
+                dst_device_id=sender_id,
+                device_type=anchor.device_type,
+                parent_id=parent_id,
+                parent_type=parent_type,
+                hop_num=anchor.hop,
+            )
+            if upstream:
+                animation_steps.append({
+                    "type": "unicast", "src": anchor, "dst": upstream,
+                    "packet": resp, "delay": 300,
+                })
+            self._log(f"  {type_str} ID:{anchor.device_id} -> "
+                      f"parent {device_type_str(parent_type)} "
+                      f"ID:{parent_id} hop:{anchor.hop}")
+
+        # Report sensors if filter is SENSOR
+        if filter_type == DeviceType.SENSOR:
+            for dev in anchor.paired_sensors:
+                if dev.device_id in seen_ids:
+                    continue
+                seen_ids.add(dev.device_id)
+                peer = self.find_node(dev.device_id)
+                hop = peer.hop if peer else anchor.hop + 1
+                resp = ParentResponse(
+                    src_device_id=dev.device_id,
+                    dst_device_id=sender_id,
+                    device_type=DeviceType.SENSOR,
+                    parent_id=anchor.device_id,
+                    parent_type=anchor.device_type,
+                    hop_num=hop,
+                )
+                if upstream:
+                    animation_steps.append({
+                        "type": "unicast", "src": anchor, "dst": upstream,
+                        "packet": resp, "delay": 300,
+                    })
+                self._log(f"  {type_str} ID:{dev.device_id} -> "
+                          f"parent ANCHOR ID:{anchor.device_id} hop:{hop}")
+
+        # Forward downstream to other anchors
+        for dev in anchor.paired_devices:
+            if dev.device_id == sender_id:
+                continue
+            peer = self.find_node(dev.device_id)
+            if not peer or not peer.is_anchor:
+                continue
+            if peer.hop <= anchor.hop:
+                continue
+            pkt = ParentQuery(src_device_id=anchor.device_id,
+                              dst_device_id=dev.device_id,
+                              target_id=0)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._anchor_handle_parent_query_all(
+                peer, anchor.device_id, filter_type, animation_steps, seen_ids)
+
+    # ========== Repair (AT+REPAIR) ==========
+
+    def simulate_repair(self) -> list:
+        """Gateway sends REPAIR to all paired anchors + sensors.
+        Each anchor forwards downstream then factory resets.
+        Each sensor factory resets. Gateway factory resets itself."""
+        gateway = None
+        for n in self.nodes:
+            if n.is_gateway:
+                gateway = n
+                break
+        if not gateway:
+            self._log("No gateway found", "ERR")
+            return []
+
+        self._log("AT+REPAIR: initiating network repair")
+        animation_steps = []
+
+        # Send REPAIR to all paired anchors
+        for dev in list(gateway.paired_devices):
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = RepairPacket(src_device_id=gateway.device_id,
+                               dst_device_id=dev.device_id)
+            animation_steps.append({
+                "type": "unicast", "src": gateway, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._anchor_handle_repair(peer, gateway.device_id, animation_steps)
+
+        # Send REPAIR to all paired sensors
+        for dev in list(gateway.paired_sensors):
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = RepairPacket(src_device_id=gateway.device_id,
+                               dst_device_id=dev.device_id)
+            animation_steps.append({
+                "type": "unicast", "src": gateway, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            # Sensor factory reset
+            peer.parent_id = None
+            peer.hop = 0
+            peer.state = NodeState.IDLE
+            peer.mesh_links.clear()
+            self._log(f"REPAIR: SENSOR ID:{peer.device_id} factory reset")
+
+        # Gateway factory resets itself
+        gateway.paired_devices.clear()
+        gateway.paired_sensors.clear()
+        gateway.mesh_links.clear()
+        self._log("REPAIR: GATEWAY factory reset")
+
+        if self.on_topology_changed:
+            self.on_topology_changed()
+        return animation_steps
+
+    def _anchor_handle_repair(self, anchor, sender_id, animation_steps):
+        """Anchor forwards REPAIR downstream then factory resets."""
+        # Forward downstream (not upstream, not peers)
+        for dev in list(anchor.paired_devices):
+            if dev.device_id == sender_id:
+                continue
+            peer = self.find_node(dev.device_id)
+            if not peer or peer.hop <= anchor.hop:
+                continue
+            pkt = RepairPacket(src_device_id=anchor.device_id,
+                               dst_device_id=dev.device_id)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            if peer.is_anchor:
+                self._anchor_handle_repair(peer, anchor.device_id,
+                                           animation_steps)
+
+        # Forward to paired sensors
+        for dev in list(anchor.paired_sensors):
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = RepairPacket(src_device_id=anchor.device_id,
+                               dst_device_id=dev.device_id)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            # Sensor factory reset
+            peer.parent_id = None
+            peer.hop = 0
+            peer.state = NodeState.IDLE
+            peer.mesh_links.clear()
+            self._log(f"REPAIR: SENSOR ID:{peer.device_id} factory reset")
+
+        # Anchor factory reset
+        anchor.paired_devices.clear()
+        anchor.paired_sensors.clear()
+        anchor.mesh_links.clear()
+        anchor.state = NodeState.IDLE
+        anchor.hop = 0
+        self._log(f"REPAIR: ANCHOR ID:{anchor.device_id} factory reset")
+
+    # ========== SET_RSSI (AT+SET_RSSI) ==========
+
+    def simulate_set_rssi(self, rssi_dbm: int) -> list:
+        """Gateway sends SET_RSSI to all anchors + sensors.
+        Each anchor forwards downstream + stores new threshold.
+        Each sensor stores. Gateway stores. Updates self.rssi_threshold."""
+        gateway = None
+        for n in self.nodes:
+            if n.is_gateway:
+                gateway = n
+                break
+        if not gateway:
+            self._log("No gateway found", "ERR")
+            return []
+
+        self._log(f"AT+SET_RSSI: setting threshold to {rssi_dbm} dBm")
+        animation_steps = []
+
+        # Send SET_RSSI to all paired anchors
+        for dev in gateway.paired_devices:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = SetRssiPacket(src_device_id=gateway.device_id,
+                                dst_device_id=dev.device_id,
+                                rssi_dbm=rssi_dbm)
+            animation_steps.append({
+                "type": "unicast", "src": gateway, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._anchor_handle_set_rssi(peer, gateway.device_id, rssi_dbm,
+                                         animation_steps)
+
+        # Send SET_RSSI to all paired sensors
+        for dev in gateway.paired_sensors:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = SetRssiPacket(src_device_id=gateway.device_id,
+                                dst_device_id=dev.device_id,
+                                rssi_dbm=rssi_dbm)
+            animation_steps.append({
+                "type": "unicast", "src": gateway, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._log(f"SET_RSSI: SENSOR ID:{peer.device_id} stored {rssi_dbm} dBm")
+
+        # Gateway stores
+        self.rssi_threshold = rssi_dbm
+        self._log(f"SET_RSSI: GATEWAY threshold now {rssi_dbm} dBm")
+
+        return animation_steps
+
+    def _anchor_handle_set_rssi(self, anchor, sender_id, rssi_dbm,
+                                animation_steps):
+        """Anchor forwards SET_RSSI downstream + stores new threshold."""
+        # Forward downstream
+        for dev in anchor.paired_devices:
+            if dev.device_id == sender_id:
+                continue
+            peer = self.find_node(dev.device_id)
+            if not peer or peer.hop <= anchor.hop:
+                continue
+            pkt = SetRssiPacket(src_device_id=anchor.device_id,
+                                dst_device_id=dev.device_id,
+                                rssi_dbm=rssi_dbm)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            if peer.is_anchor:
+                self._anchor_handle_set_rssi(peer, anchor.device_id, rssi_dbm,
+                                             animation_steps)
+
+        # Forward to paired sensors
+        for dev in anchor.paired_sensors:
+            peer = self.find_node(dev.device_id)
+            if not peer:
+                continue
+            pkt = SetRssiPacket(src_device_id=anchor.device_id,
+                                dst_device_id=dev.device_id,
+                                rssi_dbm=rssi_dbm)
+            animation_steps.append({
+                "type": "unicast", "src": anchor, "dst": peer,
+                "packet": pkt, "delay": 200,
+            })
+            self._log(f"SET_RSSI: SENSOR ID:{peer.device_id} stored {rssi_dbm} dBm")
+
+        # Store locally
+        self._log(f"SET_RSSI: ANCHOR ID:{anchor.device_id} stored {rssi_dbm} dBm")
