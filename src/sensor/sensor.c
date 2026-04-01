@@ -10,6 +10,7 @@
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
 #include "../identity.h"
@@ -136,6 +137,19 @@ static int sensor_do_pairing(void)
 
 	ALL_ERR("Pairing failed after %d attempts", PAIR_RETRY_MAX);
 	return -ETIMEDOUT;
+}
+
+/* === TX helper: transmit and wait for completion === */
+
+static int transmit_and_wait(void *data, size_t len)
+{
+	int err = transmit(TX_HANDLE, data, len);
+
+	if (err) {
+		return err;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+	return 0;
 }
 
 /* === Data transfer: send data to parent, check for ACK === */
@@ -316,6 +330,77 @@ void sensor_main(void)
 							"from ID:%d",
 							req->src_device_id);
 						sensor_send_data();
+					}
+				}
+			}
+
+			if (item.data[0] == PACKET_TYPE_REPAIR &&
+			    item.len >= REPAIR_PACKET_SIZE) {
+				const repair_packet_t *rpkt =
+					(const repair_packet_t *)
+						item.data;
+				if (rpkt->dst_device_id == device_id) {
+					ALL_INF("REPAIR from ID:%d, "
+						"clearing NVM and "
+						"rebooting...",
+						rpkt->src_device_id);
+					storage_clear_all();
+					k_sleep(K_MSEC(500));
+					sys_reboot(SYS_REBOOT_COLD);
+				}
+			}
+
+			if (item.data[0] == PACKET_TYPE_SET_RSSI &&
+			    item.len >= SET_RSSI_PACKET_SIZE) {
+				const set_rssi_packet_t *spkt =
+					(const set_rssi_packet_t *)
+						item.data;
+				if (spkt->dst_device_id == device_id) {
+					ALL_INF("SET_RSSI %d dBm from "
+						"ID:%d, storing and "
+						"rebooting...",
+						spkt->rssi_dbm,
+						spkt->src_device_id);
+					mesh_rssi_threshold_store(
+						spkt->rssi_dbm);
+					k_sleep(K_MSEC(500));
+					sys_reboot(SYS_REBOOT_COLD);
+				}
+			}
+
+			if (item.data[0] == PACKET_TYPE_PARENT_QUERY &&
+			    item.len >= PARENT_QUERY_PACKET_SIZE) {
+				const parent_query_packet_t *qry =
+					(const parent_query_packet_t *)
+						item.data;
+				if (qry->dst_device_id == device_id) {
+					node_identity_t id;
+
+					ALL_INF("PARENT_QUERY from ID:%d",
+						qry->src_device_id);
+
+					if (node_load_identity(&id) == 0) {
+						uint8_t ptype = (id.parent_hop == 0)
+							? DEVICE_TYPE_GATEWAY
+							: DEVICE_TYPE_ANCHOR;
+						parent_response_packet_t resp = {
+							.packet_type = PACKET_TYPE_PARENT_RESPONSE,
+							.src_device_id = device_id,
+							.dst_device_id = qry->src_device_id,
+							.device_type = DEVICE_TYPE_SENSOR,
+							.parent_id = id.parent_id,
+							.parent_type = ptype,
+							.hop_num = my_hop_num,
+						};
+
+						int perr = transmit_and_wait(
+							&resp, sizeof(resp));
+						if (perr) {
+							ALL_ERR("Failed to send PARENT_RESPONSE");
+						} else {
+							ALL_INF("PARENT_RESPONSE sent to ID:%d",
+								qry->src_device_id);
+						}
 					}
 				}
 			}

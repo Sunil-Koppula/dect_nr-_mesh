@@ -13,9 +13,33 @@
 #include "radio.h"
 #include "queue.h"
 #include "identity.h"
+#include "nvs_store.h"
 #include "log_all.h"
 
 LOG_MODULE_REGISTER(mesh, CONFIG_MESH_LOG_LEVEL);
+
+/* Runtime RSSI threshold (dBm * 2), loaded from NVM at startup */
+int16_t mesh_rssi_threshold_2 = MESH_RSSI_DEFAULT_DBM * 2;
+
+void mesh_rssi_threshold_load(void)
+{
+	int16_t rssi_dbm;
+
+	if (storage_read(NVS_RSSI_THRESHOLD_KEY, &rssi_dbm,
+			 sizeof(rssi_dbm)) == 0) {
+		mesh_rssi_threshold_2 = rssi_dbm * 2;
+		LOG_INF("RSSI threshold loaded from NVM: %d dBm", rssi_dbm);
+	} else {
+		mesh_rssi_threshold_2 = MESH_RSSI_DEFAULT_DBM * 2;
+		LOG_INF("RSSI threshold default: %d dBm", MESH_RSSI_DEFAULT_DBM);
+	}
+}
+
+int mesh_rssi_threshold_store(int16_t rssi_dbm)
+{
+	return storage_write(NVS_RSSI_THRESHOLD_KEY, &rssi_dbm,
+			     sizeof(rssi_dbm));
+}
 
 /* Discovery state */
 static struct discovery_candidate candidates[MAX_CANDIDATES];
@@ -157,7 +181,7 @@ int discovery_sort_mesh(void)
 		if (candidates[i].device_type == DEVICE_TYPE_GATEWAY) {
 			/* Gateways always kept */
 			valid++;
-		} else if (candidates[i].rssi_2 >= MESH_RSSI_THRESHOLD_2) {
+		} else if (candidates[i].rssi_2 >= mesh_rssi_threshold_2) {
 			valid++;
 		} else {
 			break; /* sorted, so remaining are worse */

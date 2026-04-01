@@ -32,6 +32,10 @@ typedef enum {
 	PACKET_TYPE_OTA_INIT            = 0x0C,
 	PACKET_TYPE_OTA_ACK             = 0x0D,
 	PACKET_TYPE_DATA_REQUEST        = 0x0E,
+	PACKET_TYPE_PARENT_QUERY        = 0x0F,
+	PACKET_TYPE_PARENT_RESPONSE     = 0x10,
+	PACKET_TYPE_REPAIR              = 0x11,
+	PACKET_TYPE_SET_RSSI            = 0x12,
 } packet_type_t;
 
 /* General Status Codes — unified across all packet types */
@@ -206,6 +210,47 @@ typedef struct {
 /* Max missing frags per NACK packet */
 #define LARGE_DATA_NACK_MAX_FRAGS \
 	((DATA_LEN_MAX - LARGE_DATA_NACK_PACKET_SIZE) / sizeof(uint16_t))
+
+/* Parent Query — gateway asks sensor to report its parent (relayed by anchors) */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_PARENT_QUERY */
+	uint16_t src_device_id;     /* originator (gateway) */
+	uint16_t dst_device_id;     /* target sensor */
+} __attribute__((packed)) parent_query_packet_t;
+
+#define PARENT_QUERY_PACKET_SIZE sizeof(parent_query_packet_t)
+
+/* Parent Response — sensor/anchor reports its parent info back to gateway */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_PARENT_RESPONSE */
+	uint16_t src_device_id;     /* responder's device ID */
+	uint16_t dst_device_id;     /* target (gateway) */
+	uint8_t device_type;        /* responder's device_type_t (SENSOR/ANCHOR) */
+	uint16_t parent_id;         /* responder's parent device ID */
+	uint8_t parent_type;        /* parent's device_type_t */
+	uint8_t hop_num;            /* responder's hop number */
+} __attribute__((packed)) parent_response_packet_t;
+
+#define PARENT_RESPONSE_PACKET_SIZE sizeof(parent_response_packet_t)
+
+/* Repair — broadcast factory reset to all paired devices */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_REPAIR */
+	uint16_t src_device_id;     /* originator */
+	uint16_t dst_device_id;     /* target device */
+} __attribute__((packed)) repair_packet_t;
+
+#define REPAIR_PACKET_SIZE sizeof(repair_packet_t)
+
+/* Set RSSI Threshold — broadcast new RSSI threshold, store in NVM, reboot */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_SET_RSSI */
+	uint16_t src_device_id;     /* originator */
+	uint16_t dst_device_id;     /* target device */
+	int16_t rssi_dbm;           /* new threshold in dBm (e.g. -50) */
+} __attribute__((packed)) set_rssi_packet_t;
+
+#define SET_RSSI_PACKET_SIZE sizeof(set_rssi_packet_t)
 
 /* Stream Request — sensor asks gateway to stream data for 60s every 500ms */
 typedef struct {

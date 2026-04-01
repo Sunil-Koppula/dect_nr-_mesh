@@ -38,4 +38,24 @@ void at_cmd_init(void);
 extern struct k_sem send_small_data_sem;
 extern struct k_sem send_large_data_sem;
 
+/* AT+SENSOR_<ID> / AT+ANCHOR_<ID> — parent query for a specific device.
+ * Gateway main loop checks parent_query_sem, reads parent_query_sensor_id,
+ * sends PARENT_QUERY, and logs the PARENT_RESPONSE. */
+extern struct k_sem parent_query_sem;
+extern uint16_t parent_query_sensor_id;
+
+/* AT+SENSOR_ALL / AT+ANCHOR_ALL — query parent info for all devices.
+ * Sends PARENT_QUERY to all paired anchors and sensors. */
+extern struct k_sem parent_query_all_sem;
+
+/* AT+REPAIR — broadcast factory reset to all paired devices, then self.
+ * Gateway main loop checks this, sends REPAIR to all, waits 2s, resets. */
+extern struct k_sem repair_sem;
+
+/* AT+SET_RSSI_<dBm> — broadcast new RSSI threshold to all devices.
+ * Gateway main loop checks set_rssi_sem, reads set_rssi_value,
+ * broadcasts SET_RSSI, stores in NVM, then reboots. */
+extern struct k_sem set_rssi_sem;
+extern int16_t set_rssi_value;
+
 #endif /* AT_CMD_H */

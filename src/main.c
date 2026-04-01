@@ -17,6 +17,7 @@
 #include "radio.h"
 #include "nvs_store.h"
 #include "identity.h"
+#include "mesh.h"
 #include "display.h"
 #include "psram.h"
 #include "large_data.h"
@@ -139,6 +140,9 @@ int main(void)
 		LOG_ERR("storage init failed, err %d", err);
 		return err;
 	}
+
+	/* Load RSSI threshold from NVM (or use default) */
+	mesh_rssi_threshold_load();
 
 	/* Initialize buttons for factory reset */
 	err = dk_buttons_init(button_handler);

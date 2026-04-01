@@ -22,8 +22,20 @@ struct discovery_candidate {
 
 #define MAX_CANDIDATES 8
 
-/* RSSI threshold for anchor-to-anchor mesh links (dBm * 2) */
-#define MESH_RSSI_THRESHOLD_2  (-75 * 2)
+/* RSSI threshold for anchor-to-anchor mesh links (dBm * 2).
+ * Runtime-configurable via AT+SET_RSSI_<dBm>, stored in NVM key 0x019.
+ * Default: -75 dBm if not set in NVM. */
+#define MESH_RSSI_DEFAULT_DBM  (-75)
+#define NVS_RSSI_THRESHOLD_KEY 0x019
+
+extern int16_t mesh_rssi_threshold_2;
+
+/* Load RSSI threshold from NVM (call once at startup).
+ * Sets mesh_rssi_threshold_2 from NVM, or default if not stored. */
+void mesh_rssi_threshold_load(void);
+
+/* Store RSSI threshold to NVM. rssi_dbm is in dBm (e.g. -50). */
+int mesh_rssi_threshold_store(int16_t rssi_dbm);
 
 void discovery_reset(void);
 const struct discovery_candidate *discovery_best(void);

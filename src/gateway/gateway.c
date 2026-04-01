@@ -12,8 +12,10 @@
 #include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <nrf_modem_dect_phy.h>
 #include "../identity.h"
+#include "../nvs_store.h"
 #include "../protocol.h"
 #include "../radio.h"
 #include "../queue.h"
@@ -221,6 +223,252 @@ static void send_data_request_to_all(uint8_t request_type)
 	}
 }
 
+/* === Send PARENT_QUERY for a specific sensor === */
+
+static void send_parent_query(uint16_t sensor_id)
+{
+	ALL_INF("Sending PARENT_QUERY for sensor ID:%d", sensor_id);
+
+	/* Send to all paired anchors (they will relay to the sensor) */
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		parent_query_packet_t query = {
+			.packet_type = PACKET_TYPE_PARENT_QUERY,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+		};
+
+		int err = transmit_and_wait(&query, sizeof(query));
+
+		if (err) {
+			ALL_ERR("Failed to send PARENT_QUERY to anchor ID:%d",
+				dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Also send directly to the sensor (if it's directly paired) */
+	if (paired_store_contains(&sensor_store, sensor_id)) {
+		parent_query_packet_t query = {
+			.packet_type = PACKET_TYPE_PARENT_QUERY,
+			.src_device_id = device_id,
+			.dst_device_id = sensor_id,
+		};
+
+		int err = transmit_and_wait(&query, sizeof(query));
+
+		if (err) {
+			ALL_ERR("Failed to send PARENT_QUERY to sensor ID:%d",
+				sensor_id);
+		}
+	}
+}
+
+/* === Send PARENT_QUERY to ALL paired devices === */
+
+static void send_parent_query_all(void)
+{
+	ALL_INF("Sending PARENT_QUERY to all paired devices...");
+
+	/* Send to all paired anchors (they respond + relay to children) */
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		parent_query_packet_t query = {
+			.packet_type = PACKET_TYPE_PARENT_QUERY,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+		};
+
+		int err = transmit_and_wait(&query, sizeof(query));
+
+		if (err) {
+			ALL_ERR("Failed to send PARENT_QUERY to anchor ID:%d",
+				dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Send to directly paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		parent_query_packet_t query = {
+			.packet_type = PACKET_TYPE_PARENT_QUERY,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+		};
+
+		int err = transmit_and_wait(&query, sizeof(query));
+
+		if (err) {
+			ALL_ERR("Failed to send PARENT_QUERY to sensor ID:%d",
+				dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+}
+
+/* === Handle PARENT_RESPONSE from a sensor/anchor === */
+
+static void handle_parent_response(const parent_response_packet_t *pkt)
+{
+	if (pkt->dst_device_id != device_id) {
+		return;
+	}
+
+	ALL_INF("%s ID: %d is at %s ID: %d, Hop: %d",
+		device_type_str(pkt->device_type),
+		pkt->src_device_id,
+		device_type_str(pkt->parent_type),
+		pkt->parent_id,
+		pkt->hop_num);
+}
+
+/* === Send REPAIR to all paired devices, wait 2s, factory reset === */
+
+static void send_repair_all(void)
+{
+	ALL_INF("Broadcasting REPAIR to all paired devices...");
+
+	/* Send to all paired anchors */
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		repair_packet_t pkt = {
+			.packet_type = PACKET_TYPE_REPAIR,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+		};
+
+		int err = transmit_and_wait(&pkt, sizeof(pkt));
+
+		if (err) {
+			ALL_ERR("Failed to send REPAIR to anchor ID:%d",
+				dev_id);
+		} else {
+			ALL_INF("REPAIR sent to ANCHOR ID:%d", dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Send to directly paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		repair_packet_t pkt = {
+			.packet_type = PACKET_TYPE_REPAIR,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+		};
+
+		int err = transmit_and_wait(&pkt, sizeof(pkt));
+
+		if (err) {
+			ALL_ERR("Failed to send REPAIR to sensor ID:%d",
+				dev_id);
+		} else {
+			ALL_INF("REPAIR sent to SENSOR ID:%d", dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	ALL_INF("REPAIR broadcast complete, waiting 2s before self-reset...");
+	k_sleep(K_SECONDS(2));
+
+	ALL_INF("Clearing NVM and rebooting...");
+	storage_clear_all();
+	k_sleep(K_MSEC(500));
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
+/* === Send SET_RSSI to all paired devices, store locally, reboot === */
+
+static void send_set_rssi_all(int16_t rssi_dbm)
+{
+	ALL_INF("Broadcasting SET_RSSI %d dBm to all paired devices...",
+		rssi_dbm);
+
+	/* Send to all paired anchors */
+	for (int i = 0; i < anchor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&anchor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		set_rssi_packet_t pkt = {
+			.packet_type = PACKET_TYPE_SET_RSSI,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+			.rssi_dbm = rssi_dbm,
+		};
+
+		int err = transmit_and_wait(&pkt, sizeof(pkt));
+
+		if (err) {
+			ALL_ERR("Failed to send SET_RSSI to anchor ID:%d",
+				dev_id);
+		} else {
+			ALL_INF("SET_RSSI sent to ANCHOR ID:%d", dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Send to directly paired sensors */
+	for (int i = 0; i < sensor_store.max_entries; i++) {
+		uint16_t dev_id;
+
+		if (paired_store_get(&sensor_store, i, &dev_id) != 0) {
+			continue;
+		}
+
+		set_rssi_packet_t pkt = {
+			.packet_type = PACKET_TYPE_SET_RSSI,
+			.src_device_id = device_id,
+			.dst_device_id = dev_id,
+			.rssi_dbm = rssi_dbm,
+		};
+
+		int err = transmit_and_wait(&pkt, sizeof(pkt));
+
+		if (err) {
+			ALL_ERR("Failed to send SET_RSSI to sensor ID:%d",
+				dev_id);
+		} else {
+			ALL_INF("SET_RSSI sent to SENSOR ID:%d", dev_id);
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Store locally and reboot */
+	ALL_INF("Storing RSSI threshold %d dBm and rebooting...", rssi_dbm);
+	mesh_rssi_threshold_store(rssi_dbm);
+	k_sleep(K_MSEC(500));
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
 /* === Process all queued packets (called when RX window ends) === */
 
 static void process_queue(void)
@@ -269,6 +517,14 @@ static void process_queue(void)
 			/* Not applicable for gateway */
 			break;
 
+		case PACKET_TYPE_PARENT_RESPONSE:
+			if (item.len >= PARENT_RESPONSE_PACKET_SIZE) {
+				handle_parent_response(
+					(const parent_response_packet_t *)
+						item.data);
+			}
+			break;
+
 		case PACKET_TYPE_DATA_REQUEST:
 			/* Gateway originates, doesn't process incoming */
 			break;
@@ -307,6 +563,24 @@ void gateway_main(void)
 
 		if (k_sem_take(&send_large_data_sem, K_NO_WAIT) == 0) {
 			send_data_request_to_all(DATA_REQUEST_LARGE);
+		}
+
+		if (k_sem_take(&parent_query_sem, K_NO_WAIT) == 0) {
+			send_parent_query(parent_query_sensor_id);
+		}
+
+		if (k_sem_take(&parent_query_all_sem, K_NO_WAIT) == 0) {
+			send_parent_query_all();
+		}
+
+		if (k_sem_take(&repair_sem, K_NO_WAIT) == 0) {
+			send_repair_all();
+			/* Does not return — reboots */
+		}
+
+		if (k_sem_take(&set_rssi_sem, K_NO_WAIT) == 0) {
+			send_set_rssi_all(set_rssi_value);
+			/* Does not return — reboots */
 		}
 
 		int err = receive_ms(RX_HANDLE, 1000);

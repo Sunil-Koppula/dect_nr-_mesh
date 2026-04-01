@@ -16,6 +16,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/console/console.h>
 #include <zephyr/sys/reboot.h>
@@ -24,6 +25,7 @@
 #include "identity.h"
 #include "protocol.h"
 #include "nvs_store.h"
+#include "mesh.h"
 
 /* Paired store pointers — set at runtime by gateway/anchor main.
  * NULL on sensor (no children). */
@@ -33,6 +35,20 @@ const void *gw_sensor_store_ptr;
 /* AT+SEND_*_DATA semaphores — signaled to gateway main loop */
 K_SEM_DEFINE(send_small_data_sem, 0, 1);
 K_SEM_DEFINE(send_large_data_sem, 0, 1);
+
+/* AT+SENSOR_<ID> / AT+ANCHOR_<ID> — parent query for a specific device */
+K_SEM_DEFINE(parent_query_sem, 0, 1);
+uint16_t parent_query_sensor_id;
+
+/* AT+SENSOR_ALL / AT+ANCHOR_ALL — parent query for all devices */
+K_SEM_DEFINE(parent_query_all_sem, 0, 1);
+
+/* AT+REPAIR — broadcast factory reset to all paired devices */
+K_SEM_DEFINE(repair_sem, 0, 1);
+
+/* AT+SET_RSSI_<dBm> — broadcast new RSSI threshold to all devices */
+K_SEM_DEFINE(set_rssi_sem, 0, 1);
+int16_t set_rssi_value;
 
 /* Thread configuration */
 #define AT_CMD_STACK_SIZE 2048
@@ -82,6 +98,11 @@ static void cmd_carrier(void)
 static void cmd_txpower(void)
 {
 	printk("+TXPOWER: %d\r\nOK\r\n", CONFIG_TX_POWER);
+}
+
+static void cmd_get_rssi(void)
+{
+	printk("+GET_RSSI: %d dBm\r\nOK\r\n", mesh_rssi_threshold_2 / 2);
 }
 
 static void cmd_info(void)
@@ -137,6 +158,15 @@ static void cmd_pair(void)
 
 static void cmd_factory_reset(void)
 {
+	if (my_device_type == DEVICE_TYPE_GATEWAY ||
+	    my_device_type == DEVICE_TYPE_ANCHOR) {
+		printk("+FACTORY_RESET: broadcasting to paired devices...\r\n");
+		k_sem_give(&repair_sem);
+		/* Gateway/anchor main loop handles broadcast + local reset */
+		return;
+	}
+
+	/* Sensor: local-only reset */
 	printk("+FACTORY_RESET: clearing NVM...\r\n");
 	storage_clear_all();
 	printk("+FACTORY_RESET: rebooting...\r\n");
@@ -175,6 +205,18 @@ static void cmd_send_large_data(void)
 	printk("OK\r\n");
 }
 
+static void cmd_repair(void)
+{
+	if (my_device_type != DEVICE_TYPE_GATEWAY) {
+		printk("+REPAIR: only available on gateway\r\n");
+		printk("ERROR\r\n");
+		return;
+	}
+	printk("+REPAIR: broadcasting factory reset to all devices...\r\n");
+	k_sem_give(&repair_sem);
+	printk("OK\r\n");
+}
+
 static void cmd_help(void)
 {
 	printk("+HELP:\r\n");
@@ -186,10 +228,17 @@ static void cmd_help(void)
 	printk("  AT+RSSI?        Last RSSI\r\n");
 	printk("  AT+CARRIER?     Carrier freq\r\n");
 	printk("  AT+TXPOWER?     TX power\r\n");
+	printk("  AT+GET_RSSI?    RSSI threshold\r\n");
 	printk("  AT+INFO?        All device info\r\n");
 	printk("  AT+PAIR?        Paired devices\r\n");
+	printk("  AT+SENSOR_<ID>  Query sensor parent info (gateway)\r\n");
+	printk("  AT+SENSOR_ALL   Query all sensors parent info (gateway)\r\n");
+	printk("  AT+ANCHOR_<ID>  Query anchor parent info (gateway)\r\n");
+	printk("  AT+ANCHOR_ALL   Query all anchors parent info (gateway)\r\n");
 	printk("  AT+SEND_SMALL_DATA  Request small data (gateway)\r\n");
 	printk("  AT+SEND_LARGE_DATA  Request large data (gateway)\r\n");
+	printk("  AT+SET_RSSI_<dBm> Set RSSI threshold (gateway)\r\n");
+	printk("  AT+REPAIR       Factory reset all devices (gateway)\r\n");
 	printk("  AT+FACTORY_RESET  Factory reset\r\n");
 	printk("  AT+RESET        Reboot\r\n");
 	printk("  AT+HELP         This help\r\n");
@@ -210,10 +259,12 @@ static const struct {
 	{ "+RSSI?",        cmd_rssi },
 	{ "+CARRIER?",     cmd_carrier },
 	{ "+TXPOWER?",     cmd_txpower },
+	{ "+GET_RSSI?",    cmd_get_rssi },
 	{ "+INFO?",        cmd_info },
 	{ "+PAIR?",        cmd_pair },
 	{ "+SEND_SMALL_DATA", cmd_send_small_data },
 	{ "+SEND_LARGE_DATA", cmd_send_large_data },
+	{ "+REPAIR",        cmd_repair },
 	{ "+FACTORY_RESET", cmd_factory_reset },
 	{ "+RESET",        cmd_reset },
 	{ "+HELP",         cmd_help },
@@ -259,6 +310,71 @@ static void at_cmd_thread_entry(void *p1, void *p2, void *p3)
 				found = true;
 				break;
 			}
+		}
+
+		/* Check for AT+SENSOR_ALL / AT+SENSOR_<ID> */
+		if (!found && strncmp(cmd_part, "+SENSOR_", 8) == 0) {
+			const char *suffix = cmd_part + 8;
+
+			if (my_device_type != DEVICE_TYPE_GATEWAY) {
+				printk("+SENSOR: only available on gateway\r\n");
+				printk("ERROR\r\n");
+			} else if (strcmp(suffix, "ALL") == 0) {
+				printk("+SENSOR_ALL: querying parent of all sensors...\r\n");
+				k_sem_give(&parent_query_all_sem);
+				printk("OK\r\n");
+			} else if (*suffix == '\0') {
+				printk("ERROR: missing sensor ID\r\n");
+			} else {
+				parent_query_sensor_id = (uint16_t)atoi(suffix);
+				printk("+SENSOR: querying parent of sensor ID:%d...\r\n",
+				       parent_query_sensor_id);
+				k_sem_give(&parent_query_sem);
+				printk("OK\r\n");
+			}
+			found = true;
+		}
+
+		/* Check for AT+ANCHOR_ALL / AT+ANCHOR_<ID> */
+		if (!found && strncmp(cmd_part, "+ANCHOR_", 8) == 0) {
+			const char *suffix = cmd_part + 8;
+
+			if (my_device_type != DEVICE_TYPE_GATEWAY) {
+				printk("+ANCHOR: only available on gateway\r\n");
+				printk("ERROR\r\n");
+			} else if (strcmp(suffix, "ALL") == 0) {
+				printk("+ANCHOR_ALL: querying parent of all anchors...\r\n");
+				k_sem_give(&parent_query_all_sem);
+				printk("OK\r\n");
+			} else if (*suffix == '\0') {
+				printk("ERROR: missing anchor ID\r\n");
+			} else {
+				parent_query_sensor_id = (uint16_t)atoi(suffix);
+				printk("+ANCHOR: querying parent of anchor ID:%d...\r\n",
+				       parent_query_sensor_id);
+				k_sem_give(&parent_query_sem);
+				printk("OK\r\n");
+			}
+			found = true;
+		}
+
+		/* Check for AT+SET_RSSI_<dBm> */
+		if (!found && strncmp(cmd_part, "+SET_RSSI_", 10) == 0) {
+			const char *val_str = cmd_part + 10;
+
+			if (my_device_type != DEVICE_TYPE_GATEWAY) {
+				printk("+SET_RSSI: only available on gateway\r\n");
+				printk("ERROR\r\n");
+			} else if (*val_str == '\0') {
+				printk("ERROR: missing RSSI value\r\n");
+			} else {
+				set_rssi_value = (int16_t)(-atoi(val_str));
+				printk("+SET_RSSI: broadcasting threshold %d dBm to all devices...\r\n",
+				       set_rssi_value);
+				k_sem_give(&set_rssi_sem);
+				printk("OK\r\n");
+			}
+			found = true;
 		}
 
 		if (!found) {
