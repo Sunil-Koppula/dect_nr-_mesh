@@ -1,3 +1,4 @@
-large_data:
+nvs_storage:
   region: external_flash
-  size: 0x100000
+  size: 0x10000
+

@@ -1,5 +1,5 @@
 /*
- * Generic NVS storage layer for DECT NR+ mesh network
+ * NVS storage layer on external flash for DECT NR+ mesh network
  *
  * Each device type defines its own NVS key offsets and calls
  * these generic functions with the appropriate key.

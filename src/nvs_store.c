@@ -1,5 +1,5 @@
 /*
- * Generic NVS storage layer for DECT NR+ mesh network
+ * NVS storage layer on external flash for DECT NR+ mesh network
  */
 
 #include <zephyr/kernel.h>
@@ -11,7 +11,7 @@
 
 LOG_MODULE_REGISTER(nvs_store, CONFIG_NVS_STORE_LOG_LEVEL);
 
-#define NVS_PARTITION		storage_partition
+#define NVS_PARTITION		nvs_storage
 #define NVS_PARTITION_DEVICE	FIXED_PARTITION_DEVICE(NVS_PARTITION)
 #define NVS_PARTITION_OFFSET	FIXED_PARTITION_OFFSET(NVS_PARTITION)
 
@@ -46,7 +46,7 @@ int storage_init(void)
 	}
 
 	nvs_ready = true;
-	LOG_INF("NVS storage initialized");
+	LOG_INF("NVS storage initialized (external flash)");
 	return 0;
 }
 

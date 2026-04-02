@@ -16,7 +16,6 @@ target_sources(app PRIVATE
   src/queue.c
   src/nvs_store.c
   src/identity.c
-  src/flash_store.c
   src/at_cmd.c
   src/common.c
   src/display.c
