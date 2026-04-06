@@ -8,9 +8,9 @@
 
 #include <stdint.h>
 #include <zephyr/kernel.h>
-#include "packet.h"
+#include "protocol.h"
 
-#define RX_QUEUE_SIZE 16
+#define RX_QUEUE_SIZE 128
 
 /* Received packet item */
 struct rx_queue_item {

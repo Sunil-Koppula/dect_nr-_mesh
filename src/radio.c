@@ -7,15 +7,17 @@
 #include <nrf_modem_dect_phy.h>
 #include "radio.h"
 #include "queue.h"
-#include "state.h"
+#include "identity.h"
 #include "large_data.h"
+#include "display.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(radio, CONFIG_RADIO_LOG_LEVEL);
 
 K_SEM_DEFINE(operation_sem, 0, 1);
 K_SEM_DEFINE(deinit_sem, 0, 1);
 
 bool exit_flag;
+volatile int16_t last_rssi_dbm;
 volatile int last_op_err;
 
 struct nrf_modem_dect_phy_config_params dect_phy_config_params = {
@@ -127,33 +129,76 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 	uint8_t pkt_type = local_buf[0];
 
 	/*
-	 * Process all large data packets directly in ISR context:
-	 * - INIT: k_heap_alloc(K_NO_WAIT), ISR-safe
-	 * - TRANSFER: memcpy into reassembly buffer, ISR-safe
-	 * - END: CRC verify + queue pending ACK, signals main thread
-	 *        via large_data_end_sem to cancel RX and send ACK
+	 * Large data packets (INIT, TRANSFER, END) are queued to a ring
+	 * buffer and processed by a dedicated PSRAM writer thread.
+	 * SPI PSRAM writes are NOT ISR-safe (they use mutexes/sleep).
+	 * INIT must be in the same ring so it's processed before TRANSFER
+	 * fragments that follow it.
 	 */
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_INIT &&
 	    copy_len >= LARGE_DATA_INIT_PACKET_SIZE) {
-		large_data_handle_init(
-			(const large_data_init_packet_t *)local_buf);
+		const large_data_init_packet_t *init =
+			(const large_data_init_packet_t *)local_buf;
+		if (init->dst_device_id != device_id) {
+			goto normal_rx;
+		}
+		large_data_handle_init(init);
 		return;
 	}
 
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_TRANSFER &&
 	    copy_len >= LARGE_DATA_TRANSFER_PACKET_SIZE) {
-		large_data_handle_transfer(
-			(const large_data_transfer_packet_t *)local_buf,
-			copy_len);
+		const large_data_transfer_packet_t *xfer =
+			(const large_data_transfer_packet_t *)local_buf;
+		if (xfer->dst_device_id != device_id) {
+			goto normal_rx;
+		}
+		large_data_handle_transfer(xfer, copy_len);
 		return;
 	}
 
 	if (pkt_type == PACKET_TYPE_LARGE_DATA_END &&
 	    copy_len >= LARGE_DATA_END_PACKET_SIZE) {
-		large_data_handle_end(
-			(const large_data_end_packet_t *)local_buf,
-			copy_len);
+		const large_data_end_packet_t *end =
+			(const large_data_end_packet_t *)local_buf;
+		if (end->dst_device_id != device_id) {
+			goto normal_rx;
+		}
+		large_data_handle_end(end, copy_len);
 		return;
+	}
+
+normal_rx:
+	last_rssi_dbm = evt->rssi_2 / 2;
+	display_update_rssi(last_rssi_dbm);
+
+	/*
+	 * Drop packets not addressed to us to prevent rx_queue overflow.
+	 * Pair requests are broadcast (no dst_device_id check needed).
+	 * All other packet types have dst_device_id at a known offset.
+	 */
+	if (pkt_type != PACKET_TYPE_PAIR_REQUEST && copy_len >= 5) {
+		uint16_t dst_id;
+
+		switch (pkt_type) {
+		case PACKET_TYPE_PAIR_RESPONSE:
+			/* dst_device_id at offset 4 in pair_response_packet_t */
+			memcpy(&dst_id, &local_buf[4], sizeof(dst_id));
+			break;
+		case PACKET_TYPE_PAIR_CONFIRM:
+			/* dst_device_id at offset 4 in pair_confirm_packet_t */
+			memcpy(&dst_id, &local_buf[4], sizeof(dst_id));
+			break;
+		default:
+			/* DATA, DATA_ACK, LARGE_DATA_ACK, LARGE_DATA_NACK:
+			 * dst_device_id at offset 3 */
+			memcpy(&dst_id, &local_buf[3], sizeof(dst_id));
+			break;
+		}
+
+		if (dst_id != device_id) {
+			return;
+		}
 	}
 
 	rx_queue_put(evt->data, evt->len, evt->rssi_2);
@@ -211,6 +256,10 @@ void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt)
 	case NRF_MODEM_DECT_PHY_EVT_PDC_ERROR:
 		on_pdc_crc_err(&evt->pdc_crc_err);
 		break;
+	// case NRF_MODEM_DECT_PHY_EVT_TEST_RF_TX_CW_CONTROL_CONFIG:
+	// 	LOG_INF("CW test evt: err %d", evt->test_rf_tx_cw_control.err);
+	// 	k_sem_give(&operation_sem);
+	// 	break;
 	default:
 		break;
 	}
@@ -223,7 +272,7 @@ int transmit(uint32_t handle, void *data, size_t data_len)
 	struct phy_ctrl_field_common header = {
 		.header_format = 0x0,
 		.packet_length_type = 0x0,
-		.packet_length = 0x01,
+		.packet_length = 0x04,
 		.short_network_id = (CONFIG_NETWORK_ID & 0xff),
 		.transmitter_id_hi = (device_id >> 8),
 		.transmitter_id_lo = (device_id & 0xff),
@@ -257,7 +306,7 @@ int receive(uint32_t handle)
 		.mode = NRF_MODEM_DECT_PHY_RX_MODE_CONTINUOUS,
 		.rssi_interval = NRF_MODEM_DECT_PHY_RSSI_INTERVAL_OFF,
 		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
-		.rssi_level = -60,
+		.rssi_level = -70,
 		.carrier = CONFIG_CARRIER,
 		.duration = CONFIG_RX_PERIOD_S * MSEC_PER_SEC *
 			    NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
@@ -278,7 +327,7 @@ int receive_ms(uint32_t handle, uint32_t duration_ms)
 		.mode = NRF_MODEM_DECT_PHY_RX_MODE_CONTINUOUS,
 		.rssi_interval = NRF_MODEM_DECT_PHY_RSSI_INTERVAL_OFF,
 		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
-		.rssi_level = -60,
+		.rssi_level = -100,
 		.carrier = CONFIG_CARRIER,
 		.duration = duration_ms * NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
 		.filter.short_network_id = CONFIG_NETWORK_ID & 0xff,

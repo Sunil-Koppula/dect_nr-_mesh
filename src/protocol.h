@@ -1,9 +1,9 @@
 /*
- * Packet definitions for DECT NR+ mesh network
+ * Wire protocol definitions for DECT NR+ mesh network
  */
 
-#ifndef PACKET_H
-#define PACKET_H
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
 
 #include <stdint.h>
 
@@ -28,40 +28,56 @@ typedef enum {
 	PACKET_TYPE_LARGE_DATA_END	  	= 0x08,
 	PACKET_TYPE_LARGE_DATA_ACK      = 0x09,
 	PACKET_TYPE_LARGE_DATA_NACK     = 0x0A,
+	PACKET_TYPE_STREAM_REQUEST      = 0x0B,
+	PACKET_TYPE_OTA_INIT            = 0x0C,
+	PACKET_TYPE_OTA_ACK             = 0x0D,
+	PACKET_TYPE_DATA_REQUEST        = 0x0E,
+	PACKET_TYPE_PARENT_QUERY        = 0x0F,
+	PACKET_TYPE_PARENT_RESPONSE     = 0x10,
+	PACKET_TYPE_REPAIR              = 0x11,
+	PACKET_TYPE_SET_RSSI            = 0x12,
 } packet_type_t;
 
-/* Pairing confirm status codes */
-#define PAIR_STATUS_SUCCESS 0x00
-#define PAIR_STATUS_FAILURE 0x01
-
-/* Data ACK status codes */
-#define DATA_ACK_SUCCESS  0x00
-#define DATA_ACK_CRC_FAIL 0x01
+/* General Status Codes — unified across all packet types */
+#define STATUS_SUCCESS                  0x00
+#define STATUS_FAILURE                  0x01
+#define STATUS_CRC_FAIL                 0x02
+#define STATUS_TIMEOUT                  0x03
+#define STATUS_RESOURCE_UNAVAILABLE     0x04
+#define STATUS_INVALID_PARAMETER        0x05
+#define STATUS_NOT_SUPPORTED            0x06
+#define STATUS_REJECTED                 0x07
+#define STATUS_ALREADY_EXISTS           0x08
+#define STATUS_NOT_FOUND                0x09
+#define STATUS_BUSY                     0x0A
+#define STATUS_VERSION_MISMATCH         0x0B
+#define STATUS_TRANSFER_INCOMPLETE      0x0C
+#define STATUS_STORAGE_FULL             0x0D
+#define STATUS_VENDOR_SPECIFIC          0x1F
 
 /* Large data file types */
-#define LARGE_DATA_FILE_DATA 0x00
-#define LARGE_DATA_FILE_OTA  0x01
-
-/* Large data ACK status codes */
-#define LARGE_DATA_ACK_SUCCESS  0x00
-#define LARGE_DATA_ACK_CRC_FAIL 0x01
+#define LARGE_DATA_FILE_DATA  0x00
+#define LARGE_DATA_FILE_OTA   0x01  /* OTA firmware image (unified, same for all devices) */
 
 /* Max application data length per PHY subslot */
 #define DATA_LEN_MAX 32
 
 /********** Packet Structures **********/
 
-/* Pairing Request Packet (8 bytes) */
+/* Pairing Request Packet (12 bytes) */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
 	uint16_t device_id;
 	uint32_t random_num;
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
 } __attribute__((packed)) pair_request_packet_t;
 
 #define PAIR_REQUEST_PACKET_SIZE sizeof(pair_request_packet_t)
 
-/* Pairing Response Packet (11 bytes) — unicast to requester */
+/* Pairing Response Packet (15 bytes) — unicast to requester */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
@@ -69,17 +85,23 @@ typedef struct {
 	uint16_t dst_device_id;     /* requester's ID (unicast target) */
 	uint32_t hash;
 	uint8_t hop_num;
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
 } __attribute__((packed)) pair_response_packet_t;
 
 #define PAIR_RESPONSE_PACKET_SIZE sizeof(pair_response_packet_t)
 
-/* Pairing Confirm Packet (7 bytes) — unicast to responder */
+/* Pairing Confirm Packet (11 bytes) — unicast to responder */
 typedef struct {
 	uint8_t packet_type;        /* packet_type_t */
 	uint8_t device_type;        /* device_type_t */
 	uint16_t device_id;         /* confirmer's ID */
 	uint16_t dst_device_id;     /* responder's ID (unicast target) */
-	uint8_t status;             /* PAIR_STATUS_SUCCESS / PAIR_STATUS_FAILURE */
+	uint8_t status;             /* STATUS_SUCCESS / STATUS_FAILURE */
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
 } __attribute__((packed)) pair_confirm_packet_t;
 
 #define PAIR_CONFIRM_PACKET_SIZE sizeof(pair_confirm_packet_t)
@@ -110,6 +132,20 @@ typedef struct {
 } __attribute__((packed)) data_ack_packet_t;
 
 #define DATA_ACK_PACKET_SIZE sizeof(data_ack_packet_t)
+
+/* Data request type */
+#define DATA_REQUEST_SMALL  0x00
+#define DATA_REQUEST_LARGE  0x01
+
+/* Data Request Packet (6 bytes) — gateway requests sensors to send data */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_DATA_REQUEST */
+	uint16_t src_device_id;     /* originator */
+	uint16_t dst_device_id;     /* target device */
+	uint8_t request_type;       /* DATA_REQUEST_SMALL / DATA_REQUEST_LARGE */
+} __attribute__((packed)) data_request_packet_t;
+
+#define DATA_REQUEST_PACKET_SIZE sizeof(data_request_packet_t)
 
 /********** Large Data Transfer Packets **********/
 
@@ -156,7 +192,7 @@ typedef struct {
 	uint8_t packet_type;        /* PACKET_TYPE_LARGE_DATA_ACK */
 	uint16_t src_device_id;
 	uint16_t dst_device_id;
-	uint8_t status;             /* LARGE_DATA_ACK_SUCCESS / CRC_FAIL */
+	uint8_t status;             /* STATUS_SUCCESS / STATUS_CRC_FAIL */
 } __attribute__((packed)) large_data_ack_packet_t;
 
 #define LARGE_DATA_ACK_PACKET_SIZE sizeof(large_data_ack_packet_t)
@@ -175,6 +211,90 @@ typedef struct {
 #define LARGE_DATA_NACK_MAX_FRAGS \
 	((DATA_LEN_MAX - LARGE_DATA_NACK_PACKET_SIZE) / sizeof(uint16_t))
 
+/* Parent Query — gateway asks a device to report its parent (relayed by anchors).
+ * target_id: specific device to query, or 0 for all devices. */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_PARENT_QUERY */
+	uint16_t src_device_id;     /* originator (gateway) */
+	uint16_t dst_device_id;     /* next-hop recipient */
+	uint16_t target_id;         /* 0 = query all, else specific device ID */
+} __attribute__((packed)) parent_query_packet_t;
+
+#define PARENT_QUERY_PACKET_SIZE sizeof(parent_query_packet_t)
+
+/* Parent Response — sensor/anchor reports its parent info back to gateway */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_PARENT_RESPONSE */
+	uint16_t src_device_id;     /* responder's device ID */
+	uint16_t dst_device_id;     /* target (gateway) */
+	uint8_t device_type;        /* responder's device_type_t (SENSOR/ANCHOR) */
+	uint16_t parent_id;         /* responder's parent device ID */
+	uint8_t parent_type;        /* parent's device_type_t */
+	uint8_t hop_num;            /* responder's hop number */
+} __attribute__((packed)) parent_response_packet_t;
+
+#define PARENT_RESPONSE_PACKET_SIZE sizeof(parent_response_packet_t)
+
+/* Repair — broadcast factory reset to all paired devices */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_REPAIR */
+	uint16_t src_device_id;     /* originator */
+	uint16_t dst_device_id;     /* target device */
+} __attribute__((packed)) repair_packet_t;
+
+#define REPAIR_PACKET_SIZE sizeof(repair_packet_t)
+
+/* Set RSSI Threshold — broadcast new RSSI threshold, store in NVM, reboot */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_SET_RSSI */
+	uint16_t src_device_id;     /* originator */
+	uint16_t dst_device_id;     /* target device */
+	int16_t rssi_dbm;           /* new threshold in dBm (e.g. -50) */
+} __attribute__((packed)) set_rssi_packet_t;
+
+#define SET_RSSI_PACKET_SIZE sizeof(set_rssi_packet_t)
+
+/* Stream Request — sensor asks gateway to stream data for 60s every 500ms */
+typedef struct {
+	uint8_t packet_type;
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+} __attribute__((packed)) stream_request_packet_t;
+
+#define STREAM_REQUEST_PACKET_SIZE sizeof(stream_request_packet_t)
+
+/********** OTA Update Packets **********/
+
+/* OTA ACK uses general status codes:
+ * STATUS_SUCCESS  — version is newer, ready to receive
+ * STATUS_REJECTED — version is same or older, skip */
+
+/* OTA Init — announces firmware version to target */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_OTA_INIT */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t version_major;
+	uint8_t version_minor;
+	uint16_t version_patch;
+	uint32_t image_size;        /* total OTA image size */
+} __attribute__((packed)) ota_init_packet_t;
+
+#define OTA_INIT_PACKET_SIZE sizeof(ota_init_packet_t)
+
+/* OTA ACK — target responds with accept/reject */
+typedef struct {
+	uint8_t packet_type;        /* PACKET_TYPE_OTA_ACK */
+	uint16_t src_device_id;
+	uint16_t dst_device_id;
+	uint8_t status;             /* STATUS_SUCCESS / STATUS_REJECTED */
+	uint8_t version_major;      /* target's current version */
+	uint8_t version_minor;
+	uint16_t version_patch;
+} __attribute__((packed)) ota_ack_packet_t;
+
+#define OTA_ACK_PACKET_SIZE sizeof(ota_ack_packet_t)
+
 /* Get device type as string */
 static inline const char *device_type_str(device_type_t type)
 {
@@ -186,4 +306,4 @@ static inline const char *device_type_str(device_type_t type)
 	}
 }
 
-#endif /* PACKET_H */
+#endif /* PROTOCOL_H */

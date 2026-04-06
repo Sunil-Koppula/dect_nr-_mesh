@@ -1,0 +1,93 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Board 1 (SN: 1052004739)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.elf",
+            "servertype": "jlink",
+            "device": "cortex-m33",
+            "interface": "swd",
+            "serialNumber": "1052004739",
+            "serverpath": "C:/Program Files/SEGGER/JLink_V818/JLinkGDBServerCL.exe",
+            "gdbPath": "c:/ncs/toolchains/d2843cfba2/opt/zephyr-sdk/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "svdFile": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.svd",
+            "overrideLaunchCommands": [
+                "monitor halt",
+                "monitor reset",
+                "load",
+                "monitor reset",
+                "break main",
+                "continue"
+            ]
+        },
+        {
+            "name": "Debug Board 2 (SN: 1052071448)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.elf",
+            "servertype": "jlink",
+            "device": "cortex-m33",
+            "interface": "swd",
+            "serialNumber": "1052071448",
+            "serverpath": "C:/Program Files/SEGGER/JLink_V818/JLinkGDBServerCL.exe",
+            "gdbPath": "c:/ncs/toolchains/d2843cfba2/opt/zephyr-sdk/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "svdFile": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.svd",
+            "overrideLaunchCommands": [
+                "monitor halt",
+                "monitor reset",
+                "load",
+                "monitor reset",
+                "break main",
+                "continue"
+            ]
+        },
+        {
+            "name": "Debug Board 3 (SN: 1052050495)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.elf",
+            "servertype": "jlink",
+            "device": "cortex-m33",
+            "interface": "swd",
+            "serialNumber": "1052050495",
+            "serverpath": "C:/Program Files/SEGGER/JLink_V818/JLinkGDBServerCL.exe",
+            "gdbPath": "c:/ncs/toolchains/d2843cfba2/opt/zephyr-sdk/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "svdFile": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.svd",
+            "overrideLaunchCommands": [
+                "monitor halt",
+                "monitor reset",
+                "load",
+                "monitor reset",
+                "break main",
+                "continue"
+            ]
+        },
+        {
+            "name": "Debug Board 4 (SN: 1052009857)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.elf",
+            "servertype": "jlink",
+            "device": "cortex-m33",
+            "interface": "swd",
+            "serialNumber": "1052009857",
+            "serverpath": "C:/Program Files/SEGGER/JLink_V818/JLinkGDBServerCL.exe",
+            "gdbPath": "c:/ncs/toolchains/d2843cfba2/opt/zephyr-sdk/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb.exe",
+            "svdFile": "${workspaceFolder}/build/hello_dect/zephyr/zephyr.svd",
+            "overrideLaunchCommands": [
+                "monitor halt",
+                "monitor reset",
+                "load",
+                "monitor reset",
+                "break main",
+                "continue"
+            ]
+        }
+    ]
+}

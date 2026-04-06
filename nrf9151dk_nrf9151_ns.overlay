@@ -1,0 +1,67 @@
+/*
+ * Device-type selection pins (active-low, internal pull-up):
+ *   P0.21  P0.23  →  type
+ *     0      0       Gateway
+ *     0      1       Anchor
+ *     1      0       Sensor
+ *     1      1       (reserved, defaults to Sensor)
+ */
+/ {
+	chosen {
+		nordic,pm-ext-flash = &gd25wb256;
+	};
+
+	device_type_pins {
+		compatible = "gpio-keys";
+		devtype_pin0: devtype_pin0 {
+			gpios = <&gpio0 21 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "Device type bit 0";
+		};
+		devtype_pin1: devtype_pin1 {
+			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "Device type bit 1";
+		};
+	};
+};
+
+/*
+ * SPI3 bus: both external flash (CS1=P0.20) and PSRAM (CS0=D10) coexist.
+ * The SPI driver selects the correct CS based on the device's reg index.
+ */
+
+&gd25wb256 {
+	status = "okay";
+};
+
+&spi3 {
+	psram0: psram0@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+	};
+};
+
+/* UART1 for DFR0997 LCD display (9600 baud) */
+&uart1 {
+	status = "okay";
+	current-speed = <9600>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-1 = <&uart1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 1)>,
+				<NRF_PSEL(UART_RX, 0, 0)>;
+		};
+	};
+	uart1_sleep: uart1_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 1)>,
+				<NRF_PSEL(UART_RX, 0, 0)>;
+			low-power-enable;
+		};
+	};
+};

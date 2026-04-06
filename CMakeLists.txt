@@ -14,10 +14,14 @@ target_sources(app PRIVATE
   src/radio.c
   src/mesh.c
   src/queue.c
-  src/storage.c
-  src/paired_store.c
-  src/large_data.c
+  src/nvs_store.c
+  src/identity.c
+  src/at_cmd.c
+  src/common.c
+  src/display.c
   src/gateway/gateway.c
   src/anchor/anchor.c
   src/sensor/sensor.c
+  src/psram.c
+  src/large_data.c
 )

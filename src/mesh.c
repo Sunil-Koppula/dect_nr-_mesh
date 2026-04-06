@@ -6,11 +6,41 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
+#include <zephyr/app_version.h>
 #include "mesh.h"
+#include "mesh_tx.h"
+#include "crc.h"
 #include "radio.h"
-#include "state.h"
+#include "queue.h"
+#include "identity.h"
+#include "nvs_store.h"
+#include "log_all.h"
+#include "common.h"
 
-LOG_MODULE_DECLARE(app);
+LOG_MODULE_REGISTER(mesh, CONFIG_MESH_LOG_LEVEL);
+
+/* Runtime RSSI threshold (dBm * 2), loaded from NVM at startup */
+int16_t mesh_rssi_threshold_2 = MESH_RSSI_DEFAULT_DBM * 2;
+
+void mesh_rssi_threshold_load(void)
+{
+	int16_t rssi_dbm;
+
+	if (storage_read(NVS_RSSI_THRESHOLD_KEY, &rssi_dbm,
+			 sizeof(rssi_dbm)) == 0) {
+		mesh_rssi_threshold_2 = rssi_dbm * 2;
+		LOG_INF("RSSI threshold loaded from NVM: %d dBm", rssi_dbm);
+	} else {
+		mesh_rssi_threshold_2 = MESH_RSSI_DEFAULT_DBM * 2;
+		LOG_INF("RSSI threshold default: %d dBm", MESH_RSSI_DEFAULT_DBM);
+	}
+}
+
+int mesh_rssi_threshold_store(int16_t rssi_dbm)
+{
+	return storage_write(NVS_RSSI_THRESHOLD_KEY, &rssi_dbm,
+			     sizeof(rssi_dbm));
+}
 
 /* Discovery state */
 static struct discovery_candidate candidates[MAX_CANDIDATES];
@@ -41,6 +71,9 @@ void discovery_add_response(const pair_response_packet_t *pkt, int16_t rssi_2)
 	c->hash = pkt->hash;
 	c->hop_num = pkt->hop_num;
 	c->rssi_2 = rssi_2;
+	c->version_major = pkt->version_major;
+	c->version_minor = pkt->version_minor;
+	c->version_patch = pkt->version_patch;
 }
 
 const struct discovery_candidate *discovery_best(void)
@@ -88,13 +121,158 @@ int discovery_count(void)
 	return candidate_count;
 }
 
+const struct discovery_candidate *discovery_get(int index)
+{
+	if (index < 0 || index >= candidate_count) {
+		return NULL;
+	}
+	return &candidates[index];
+}
+
+/*
+ * Sort candidates by mesh priority and filter:
+ *   1. Gateways and anchors with minimum hop count come first
+ *   2. Then anchors with RSSI above threshold (-75 dBm)
+ *   3. Discard anchors below RSSI threshold
+ * Returns count of valid candidates after filtering.
+ */
+int discovery_sort_mesh(void)
+{
+	if (candidate_count == 0) {
+		return 0;
+	}
+
+	/* Simple insertion sort by priority */
+	for (int i = 1; i < candidate_count; i++) {
+		struct discovery_candidate tmp = candidates[i];
+		int j = i - 1;
+
+		while (j >= 0) {
+			struct discovery_candidate *c = &candidates[j];
+			bool swap = false;
+
+			/* Gateway always ranks higher than anchor */
+			if (tmp.device_type == DEVICE_TYPE_GATEWAY &&
+			    c->device_type != DEVICE_TYPE_GATEWAY) {
+				swap = true;
+			} else if (tmp.device_type == c->device_type) {
+				/* Same type: prefer lower hop */
+				if (tmp.hop_num < c->hop_num) {
+					swap = true;
+				} else if (tmp.hop_num == c->hop_num &&
+					   tmp.rssi_2 > c->rssi_2) {
+					/* Same hop: prefer better RSSI */
+					swap = true;
+				}
+			}
+
+			if (!swap) {
+				break;
+			}
+			candidates[j + 1] = candidates[j];
+			j--;
+		}
+		candidates[j + 1] = tmp;
+	}
+
+	/* Filter out anchors below RSSI threshold */
+	int valid = 0;
+
+	for (int i = 0; i < candidate_count; i++) {
+		if (candidates[i].device_type == DEVICE_TYPE_GATEWAY) {
+			/* Gateways always kept */
+			valid++;
+		} else if (candidates[i].rssi_2 >= mesh_rssi_threshold_2) {
+			valid++;
+		} else {
+			break; /* sorted, so remaining are worse */
+		}
+	}
+
+	candidate_count = valid;
+	return valid;
+}
+
+/* === Neighbor table === */
+
+struct mesh_neighbor neighbor_table[MAX_NEIGHBORS];
+int neighbor_count;
+
+void neighbor_reset(void)
+{
+	memset(neighbor_table, 0, sizeof(neighbor_table));
+	neighbor_count = 0;
+}
+
+int neighbor_add(uint16_t device_id, uint8_t device_type,
+		 uint8_t hop_num, int16_t rssi_2)
+{
+	/* Check if already in table — update if so */
+	for (int i = 0; i < neighbor_count; i++) {
+		if (neighbor_table[i].device_id == device_id) {
+			neighbor_table[i].hop_num = hop_num;
+			neighbor_table[i].rssi_2 = rssi_2;
+			neighbor_table[i].active = true;
+			return 0;
+		}
+	}
+
+	if (neighbor_count >= MAX_NEIGHBORS) {
+		LOG_WRN("Neighbor table full");
+		return -ENOMEM;
+	}
+
+	struct mesh_neighbor *n = &neighbor_table[neighbor_count++];
+
+	n->device_id = device_id;
+	n->device_type = device_type;
+	n->hop_num = hop_num;
+	n->rssi_2 = rssi_2;
+	n->active = true;
+
+	return 0;
+}
+
+const struct mesh_neighbor *neighbor_best_route(void)
+{
+	const struct mesh_neighbor *best = NULL;
+
+	for (int i = 0; i < neighbor_count; i++) {
+		if (!neighbor_table[i].active) {
+			continue;
+		}
+		if (best == NULL) {
+			best = &neighbor_table[i];
+			continue;
+		}
+		/* Gateway always wins */
+		if (neighbor_table[i].device_type == DEVICE_TYPE_GATEWAY &&
+		    best->device_type != DEVICE_TYPE_GATEWAY) {
+			best = &neighbor_table[i];
+			continue;
+		}
+		if (best->device_type == DEVICE_TYPE_GATEWAY &&
+		    neighbor_table[i].device_type != DEVICE_TYPE_GATEWAY) {
+			continue;
+		}
+		/* Prefer lower hop count */
+		if (neighbor_table[i].hop_num < best->hop_num) {
+			best = &neighbor_table[i];
+		} else if (neighbor_table[i].hop_num == best->hop_num &&
+			   neighbor_table[i].rssi_2 > best->rssi_2) {
+			best = &neighbor_table[i];
+		}
+	}
+
+	return best;
+}
+
 /* CRC-16/CCITT (polynomial 0x1021) */
-uint16_t compute_crc16(const void *data, uint16_t len)
+uint16_t compute_crc16_continue(uint16_t crc, const void *data, uint32_t len)
 {
 	const uint8_t *p = data;
-	uint16_t crc = 0xFFFF;
 
-	for (uint16_t i = 0; i < len; i++) {
+	for (uint32_t i = 0; i < len; i++) {
 		crc ^= (uint16_t)p[i] << 8;
 		for (int j = 0; j < 8; j++) {
 			if (crc & 0x8000) {
@@ -105,6 +283,11 @@ uint16_t compute_crc16(const void *data, uint16_t len)
 		}
 	}
 	return crc;
+}
+
+uint16_t compute_crc16(const void *data, uint32_t len)
+{
+	return compute_crc16_continue(0xFFFF, data, len);
 }
 
 uint32_t compute_pair_hash(uint16_t dev_id, uint32_t random_num)
@@ -128,6 +311,9 @@ int send_pair_request(uint32_t handle, uint32_t random_num)
 		.device_type = (uint8_t)my_device_type,
 		.device_id = device_id,
 		.random_num = random_num,
+		.version_major = APP_VERSION_MAJOR,
+		.version_minor = APP_VERSION_MINOR,
+		.version_patch = APP_PATCHLEVEL,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }
@@ -141,6 +327,9 @@ int send_pair_response(uint32_t handle, uint16_t dst_id, uint32_t hash)
 		.dst_device_id = dst_id,
 		.hash = hash,
 		.hop_num = my_hop_num,
+		.version_major = APP_VERSION_MAJOR,
+		.version_minor = APP_VERSION_MINOR,
+		.version_patch = APP_PATCHLEVEL,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }
@@ -153,6 +342,9 @@ int send_pair_confirm(uint32_t handle, uint16_t dst_id, uint8_t status)
 		.device_id = device_id,
 		.dst_device_id = dst_id,
 		.status = status,
+		.version_major = APP_VERSION_MAJOR,
+		.version_minor = APP_VERSION_MINOR,
+		.version_patch = APP_PATCHLEVEL,
 	};
 	return transmit(handle, &pkt, sizeof(pkt));
 }
@@ -181,4 +373,51 @@ int send_data(uint32_t handle, uint16_t dst_id, const void *payload,
 	memcpy(&pkt->payload[payload_len], &crc, sizeof(crc));
 
 	return transmit(handle, buf, total);
+}
+
+/* === Scan nearby devices === */
+
+int scan_nearby(uint32_t tx_handle, uint32_t rx_handle)
+{
+	ALL_INF("Scanning nearby devices...");
+
+	uint32_t rand_num = next_random();
+
+	int err = send_pair_request(tx_handle, rand_num);
+
+	if (err) {
+		LOG_ERR("Scan: failed to send pair request, err %d", err);
+		return -1;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	discovery_reset();
+
+	/* Listen for responses for 1 second */
+	err = receive_ms(rx_handle, 1000);
+	if (err) {
+		LOG_ERR("Scan: receive failed, err %d", err);
+		return -1;
+	}
+	k_sem_take(&operation_sem, K_FOREVER);
+
+	/* Drain queue and collect pair responses */
+	drain_discovery_responses(false);
+
+	int count = discovery_count();
+
+	ALL_INF("Scan: %d device(s) found", count);
+
+	for (int i = 0; i < count; i++) {
+		const struct discovery_candidate *c = discovery_get(i);
+
+		if (!c) {
+			continue;
+		}
+		ALL_INF("  %s ID:%d h%d %ddBm",
+			device_type_str(c->device_type),
+			c->device_id, c->hop_num, c->rssi_2 / 2);
+	}
+
+	return count;
 }

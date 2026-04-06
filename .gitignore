@@ -1,4 +1,4 @@
 # build
-/build_gateway
-/build_anchor
-/build_sensor
+/build
+
+/simulator/__pycache__

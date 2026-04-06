@@ -1,0 +1,4 @@
+nvs_storage:
+  region: external_flash
+  size: 0x10000
+

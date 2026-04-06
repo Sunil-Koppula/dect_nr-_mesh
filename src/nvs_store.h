@@ -1,12 +1,12 @@
 /*
- * Generic NVS storage layer for DECT NR+ mesh network
+ * NVS storage layer on external flash for DECT NR+ mesh network
  *
  * Each device type defines its own NVS key offsets and calls
  * these generic functions with the appropriate key.
  */
 
-#ifndef STORAGE_H
-#define STORAGE_H
+#ifndef NVS_STORE_H
+#define NVS_STORE_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -30,4 +30,4 @@ bool storage_exists(uint16_t key);
 /* Erase all NVS data (factory reset) */
 int storage_clear_all(void);
 
-#endif /* STORAGE_H */
+#endif /* NVS_STORE_H */
