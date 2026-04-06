@@ -247,6 +247,7 @@ static int anchor_do_mesh_pairing(void)
 
 			/* Store in NVS paired device store with version */
 			err = paired_store_add(&device_store, c->device_id,
+					       c->device_type,
 					       c->version_major,
 					       c->version_minor,
 					       c->version_patch);
@@ -323,6 +324,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 	}
 
 	int err = paired_store_add(store, pkt->device_id,
+				   pkt->device_type,
 				   pkt->version_major, pkt->version_minor,
 				   pkt->version_patch);
 
@@ -811,6 +813,7 @@ static void anchor_rediscovery(void)
 			     c->hop_num, c->rssi_2);
 
 		paired_store_add(&device_store, c->device_id,
+				 c->device_type,
 				 c->version_major, c->version_minor,
 				 c->version_patch);
 
@@ -857,6 +860,7 @@ void anchor_main(void)
 		/* Ensure best-route neighbor is in paired store */
 		if (!paired_store_contains(&device_store, identity.parent_id)) {
 			paired_store_add(&device_store, identity.parent_id,
+					 DEVICE_TYPE_UNKNOWN,
 					 0, 0, 0);
 		}
 

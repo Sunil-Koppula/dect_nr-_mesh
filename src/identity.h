@@ -71,6 +71,7 @@ bool node_has_identity(void);
 /* Paired device record — stored in NVS */
 typedef struct {
 	uint16_t device_id;
+	uint8_t device_type;      /* device_type_t */
 	uint8_t version_major;
 	uint8_t version_minor;
 	uint16_t version_patch;
@@ -82,8 +83,9 @@ typedef struct {
 	const char *label;      /* "Anchor" or "Sensor", for logging */
 } paired_store_t;
 
-/* Add a device with version info. Updates version if already present. */
+/* Add a device with type and version info. Updates if already present. */
 int paired_store_add(const paired_store_t *ps, uint16_t dev_id,
+		     uint8_t dev_type,
 		     uint8_t ver_major, uint8_t ver_minor, uint16_t ver_patch);
 
 /* Check if a device ID is in the store */

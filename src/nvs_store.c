@@ -7,13 +7,14 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/nvs.h>
+#include <zephyr/devicetree.h>
+#include <pm_config.h>
 #include "nvs_store.h"
 
 LOG_MODULE_REGISTER(nvs_store, CONFIG_NVS_STORE_LOG_LEVEL);
 
-#define NVS_PARTITION		nvs_storage
-#define NVS_PARTITION_DEVICE	FIXED_PARTITION_DEVICE(NVS_PARTITION)
-#define NVS_PARTITION_OFFSET	FIXED_PARTITION_OFFSET(NVS_PARTITION)
+/* External flash device from the 'nordic,pm-ext-flash' chosen node */
+#define EXT_FLASH_DEVICE DEVICE_DT_GET(DT_CHOSEN(nordic_pm_ext_flash))
 
 static struct nvs_fs nvs;
 static bool nvs_ready;
@@ -23,13 +24,13 @@ int storage_init(void)
 	int err;
 	struct flash_pages_info page_info;
 
-	nvs.flash_device = NVS_PARTITION_DEVICE;
+	nvs.flash_device = EXT_FLASH_DEVICE;
 	if (!device_is_ready(nvs.flash_device)) {
-		LOG_ERR("Flash device not ready");
+		LOG_ERR("External flash device not ready");
 		return -ENODEV;
 	}
 
-	nvs.offset = NVS_PARTITION_OFFSET;
+	nvs.offset = PM_NVS_STORAGE_OFFSET;
 	err = flash_get_page_info_by_offs(nvs.flash_device, nvs.offset, &page_info);
 	if (err) {
 		LOG_ERR("Failed to get flash page info, err %d", err);
@@ -37,7 +38,7 @@ int storage_init(void)
 	}
 
 	nvs.sector_size = page_info.size;
-	nvs.sector_count = 2U;
+	nvs.sector_count = PM_NVS_STORAGE_SIZE / page_info.size;
 
 	err = nvs_mount(&nvs);
 	if (err) {
@@ -46,7 +47,8 @@ int storage_init(void)
 	}
 
 	nvs_ready = true;
-	LOG_INF("NVS storage initialized (external flash)");
+	LOG_INF("NVS storage initialized (external flash, offset 0x%lx, %u sectors)",
+		nvs.offset, nvs.sector_count);
 	return 0;
 }
 

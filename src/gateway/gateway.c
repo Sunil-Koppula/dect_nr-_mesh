@@ -124,6 +124,7 @@ static void handle_pair_confirm(const pair_confirm_packet_t *pkt)
 	}
 
 	int err = paired_store_add(store, pkt->device_id,
+				   pkt->device_type,
 				   pkt->version_major, pkt->version_minor,
 				   pkt->version_patch);
 

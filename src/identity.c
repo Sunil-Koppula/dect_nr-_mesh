@@ -49,15 +49,17 @@ static int find_slot(const paired_store_t *ps, uint16_t dev_id, bool *found)
 }
 
 int paired_store_add(const paired_store_t *ps, uint16_t dev_id,
+		     uint8_t dev_type,
 		     uint8_t ver_major, uint8_t ver_minor, uint16_t ver_patch)
 {
 	bool found;
 	int slot = find_slot(ps, dev_id, &found);
 
 	if (found) {
-		/* Update version if already present */
+		/* Update if already present */
 		paired_device_info_t info = {
 			.device_id = dev_id,
+			.device_type = dev_type,
 			.version_major = ver_major,
 			.version_minor = ver_minor,
 			.version_patch = ver_patch,
@@ -71,6 +73,7 @@ int paired_store_add(const paired_store_t *ps, uint16_t dev_id,
 
 	paired_device_info_t info = {
 		.device_id = dev_id,
+		.device_type = dev_type,
 		.version_major = ver_major,
 		.version_minor = ver_minor,
 		.version_patch = ver_patch,
@@ -162,12 +165,12 @@ void paired_store_print(const paired_store_t *ps)
 {
 	paired_device_info_t info;
 
-	ALL_INF("=== Paired %ss (%d) ===", ps->label, paired_store_count(ps));
+	ALL_INF("=== Paired Devices (%d) ===", paired_store_count(ps));
 	for (int i = 0; i < ps->max_entries; i++) {
 		if (storage_read(ps->nvs_base + i, &info, sizeof(info)) == 0) {
-			ALL_INF("  [%d] %s ID:%d v%d.%d.%d", i, ps->label,
-				info.device_id, info.version_major,
-				info.version_minor, info.version_patch);
+			ALL_INF("  [%d] %s ID:%d v%d.%d.%d", i, device_type_str(info.device_type),
+				info.device_id, info.version_major, info.version_minor,
+				info.version_patch);
 		}
 	}
 }
